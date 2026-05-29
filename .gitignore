@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+
+# Vector database (local, regenerable — never commit)
+chroma_db/
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

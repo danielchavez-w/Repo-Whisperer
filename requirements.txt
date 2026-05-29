@@ -1,0 +1,13 @@
+# Repo Whisperer — Phase 1 dependencies
+
+# Anthropic API — question answering (claude-opus-4-8)
+anthropic>=0.40.0
+
+# Local persistent vector database
+chromadb>=0.5.0
+
+# Local embeddings (all-MiniLM-L6-v2) — no API cost
+sentence-transformers>=3.0.0
+
+# Load the Anthropic API key from .env
+python-dotenv>=1.0.0
