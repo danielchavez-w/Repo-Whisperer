@@ -1,5 +1,35 @@
 # Development Log
 
+## 2026-05-29 — Step 3: Chunking
+
+Added `repo_whisperer/chunk.py`: splits each `SourceFile` into overlapping
+line-window `Chunk` records for step 4 to embed.
+
+- **Window + overlap:** default 40-line windows with 10-line (25%) overlap,
+  both tunable per call / via `--window` / `--overlap`. Overlap keeps a block
+  that straddles a window boundary recoverable in at least one whole chunk.
+- **Metadata:** each chunk carries `path` and **1-indexed, inclusive**
+  `start_line`/`end_line`, plus a stable id `"<path>:<start>-<end>"` (the
+  citation key and Chroma document id later).
+- **Edge cases:** files shorter than the window yield a single whole-file
+  chunk; the final window always ends exactly on the last line (no tiny
+  redundant tail); empty / whitespace-only files yield nothing.
+- Standalone runner previews the first N chunks and prints a count/avg-size
+  summary.
+
+**Verified** with a controlled 100-line case: window=40/overlap=10 produces
+windows `(1-40), (31-70), (61-100)` — correct 30-line step, 1-indexing, and
+exact end alignment. Real repos chunk cleanly (e.g. this repo → 86 chunks).
+
+**Decision:** `all-MiniLM-L6-v2` truncates at ~256 tokens, so a dense 40-line
+window may exceed the embedder's window and be partially truncated for
+*retrieval*. Acceptable for the Phase 1 baseline and easy to tune down later;
+the full chunk text is still what gets handed to Claude for answering.
+
+**Note:** the IDE's integrated terminal was doubling/garbling stdout this
+session, so test results were verified by writing to a file and reading it
+back rather than trusting the on-screen terminal output.
+
 ## 2026-05-29 — Step 2: Ingestion
 
 Added `repo_whisperer/ingest.py`: walks a target repo and returns `SourceFile`
