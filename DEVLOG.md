@@ -1,5 +1,36 @@
 # Development Log
 
+## 2026-05-29 — Session wrap-up & next steps
+
+**Done so far (all committed + pushed to `origin/main`):**
+- Step 1 — Scaffold (`21c0f3f`)
+- Step 2 — Ingestion, `repo_whisperer/ingest.py` (`8923c36`)
+- Step 3 — Chunking, `repo_whisperer/chunk.py` (`eec2a52`)
+
+Pipeline verified end-to-end through chunking on this repo and on the external
+`/Users/dan/Desktop/Swerve` test repo (18 files → 109 chunks).
+
+**Next session — Step 4: Embedding + ChromaDB storage**
+- Add `repo_whisperer/embed.py` (or `store.py`): embed each `Chunk.text` with
+  `sentence-transformers` `all-MiniLM-L6-v2` (model loads locally, no API cost).
+- Persist to a local ChromaDB collection in `chroma_db/` (already gitignored).
+  Use each chunk's `id` (`"<path>:<start>-<end>"`) as the Chroma document id and
+  store `path`/`start_line`/`end_line` as metadata for citations.
+- Make re-ingestion idempotent (upsert by id, or clear+rebuild the collection)
+  so re-running on the same repo doesn't duplicate chunks.
+- Provide a standalone runner to embed a repo and report collection size.
+
+**Then:** Step 5 (retrieve top-k + grounded Claude answer with citations,
+`claude-opus-4-8`), Step 6 (CLI: `ingest <path>`, `ask "<question>"`).
+
+**Reminders for next session:**
+- Run everything via `.venv/bin/python` (deps already installed there).
+- Windsurf's integrated terminal was garbling stdout — verify command output by
+  writing to a temp file and reading it back if it recurs.
+- Optional cleanup: reconcile the cosmetic line-count off-by-one between
+  `ingest` (`\n`-count+1) and `chunk` (`splitlines()`) for files ending in a
+  trailing newline. Citations are unaffected.
+
 ## 2026-05-29 — Step 3: Chunking
 
 Added `repo_whisperer/chunk.py`: splits each `SourceFile` into overlapping
