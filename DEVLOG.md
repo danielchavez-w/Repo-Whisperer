@@ -1,5 +1,40 @@
 # Development Log
 
+## 2026-06-02 — Step 4: Embedding + ChromaDB storage
+
+Added `repo_whisperer/store.py`: embeds each chunk locally and persists it to a
+local, persistent ChromaDB collection — the searchable index step 5 will query.
+
+- **Embedding:** `sentence-transformers` `all-MiniLM-L6-v2` (384-dim, CPU, no API
+  cost), loaded once via a cached lazy loader and imported lazily so the module
+  doesn't drag in torch unless embedding actually happens. Vectors are
+  L2-normalized and the collection uses cosine space, so they pair correctly.
+- **Storage:** one collection named `repo` in `chroma_db/` (gitignored). Each
+  chunk's stable id (`"<path>:<start>-<end>"`) is the Chroma document id; the
+  chunk text is the document; and `path`/`start_line`/`end_line` are stored as
+  metadata for step-5 citations. Added in batches of 256 to bound memory.
+- **Idempotent re-ingestion:** the collection is dropped and rebuilt on every
+  run, so a file that shrank, moved, or was deleted leaves no stale chunks —
+  chosen over upsert-by-id because a clean rebuild can't orphan anything.
+- Standalone runner ingests a repo and reports the final collection size; warns
+  if the stored count ever diverges from the chunk count (id collision guard).
+
+**Verified:** this repo → 8 files / 29 chunks, all 29 stored; a second run stays
+at 29 (idempotent, no duplicate-id crash); a fresh process reads 29 back from
+disk and a query for "how are files chunked into windows?" returns `chunk.py`
+and the task doc's chunking section as top hits. External `Swerve` repo →
+18 files / 109 chunks (matches the earlier chunking-step count). `chroma_db/`
+stays untracked by git.
+
+**Environment fix (prerequisite):** the `.venv` had drifted to a broken state —
+`sentence-transformers` wouldn't import. Root cause is the Intel/x86_64 Mac:
+PyTorch's last macOS-x86_64 wheel is **2.2.2**, but unpinned installs had pulled
+`transformers 5.x` (needs torch ≥ 2.4) and `numpy 2.x` (breaks torch 2.2.2's
+compiled extension). Pinned the stack back down to fit the torch ceiling
+(`numpy<2`, `torch==2.2.2`, `transformers>=4.40,<5`, `sentence-transformers
+>=3.0,<4`) and documented the reason in `requirements.txt` so it can't drift
+again.
+
 ## 2026-05-29 — Session wrap-up & next steps
 
 **Done so far (all committed + pushed to `origin/main`):**
