@@ -1,4 +1,11 @@
 # Repo Whisperer — Phase 1 dependencies
+#
+# NOTE ON VERSION PINS (Intel/x86_64 macOS):
+# PyTorch's last macOS-x86_64 wheel is 2.2.2 — there are no Intel-Mac wheels
+# for torch >= 2.3. The rest of the ML stack must stay on versions compatible
+# with torch 2.2.2: numpy must be 1.x (torch 2.2.2's compiled extension breaks
+# under numpy 2.x), and transformers must be < 5 (transformers 5.x requires
+# torch >= 2.4). These pins keep `sentence-transformers` importable here.
 
 # Anthropic API — question answering (claude-opus-4-8)
 anthropic>=0.40.0
@@ -7,7 +14,12 @@ anthropic>=0.40.0
 chromadb>=0.5.0
 
 # Local embeddings (all-MiniLM-L6-v2) — no API cost
-sentence-transformers>=3.0.0
+sentence-transformers>=3.0,<4
+transformers>=4.40,<5
+
+# Pinned for the Intel-Mac torch ceiling (see note above)
+torch==2.2.2
+numpy<2
 
 # Load the Anthropic API key from .env
 python-dotenv>=1.0.0
