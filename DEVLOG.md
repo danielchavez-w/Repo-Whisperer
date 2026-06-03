@@ -1,5 +1,31 @@
 # Development Log
 
+## 2026-06-02 — Step 6: CLI wiring (Phase 1 complete)
+
+Added `repo_whisperer/cli.py` and `repo_whisperer/__main__.py`: a single
+`python -m repo_whisperer` entry point with the two commands the spec asks for,
+dispatching to the functions built in earlier steps.
+
+- `ingest <path>` → `store.ingest_repo` (walk → chunk → embed → store, rebuilding
+  the collection). Supports `--db`, `--window`, `--overlap`.
+- `ask "<question>"` → `answer.answer_question` (retrieve top-k → grounded, cited
+  answer). Supports `--db` and `-k`. Prints the answer followed by the retrieved
+  chunks and their cosine distances.
+- argparse subcommands; a required subcommand means a bare invocation prints
+  usage and exits 2. Path/key/empty-store errors surface as friendly one-liners
+  (exit 1) rather than tracebacks.
+- Updated `README.md` Usage from a "coming soon" stub to the real commands.
+
+**Verified** end to end: `--help` lists both commands; `ingest .` indexed this
+repo (11 files / 42 chunks); `ask` answered a question about this codebase's own
+re-ingest idempotency, correctly citing `store.py` line ranges and quoting the
+actual code — a clean self-referential check that ingest→retrieve→answer works
+through the unified CLI. Bare invocation errors with usage as expected.
+
+**Phase 1 is complete.** Full pipeline: ingest → chunk → embed → ChromaDB →
+retrieve → grounded cited answer, driven by `ingest`/`ask`. Phases 2 and 3
+remain out of scope.
+
 ## 2026-06-02 — Step 5: Retrieval + grounded answer
 
 Added `repo_whisperer/answer.py`: the payoff step — turn a question into a

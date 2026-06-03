@@ -40,9 +40,25 @@ cp .env.example .env   # then add your ANTHROPIC_API_KEY
 
 ## Usage
 
-> Coming as the CLI is built out (steps 2–6). Planned commands:
->
-> ```bash
-> repo-whisperer ingest <path-to-repo>
-> repo-whisperer ask "how does X work?"
-> ```
+Two commands: index a repo once, then ask as many questions as you like.
+
+```bash
+# 1. Index a repository into the local vector store (chroma_db/)
+python -m repo_whisperer ingest /path/to/some-repo
+
+# 2. Ask grounded questions about it
+python -m repo_whisperer ask "how does X work?"
+```
+
+Each answer is grounded in the retrieved code and cites the exact
+`path:start-end` line ranges it used; the retrieved chunks (with cosine
+distances) are printed beneath the answer so you can verify the grounding.
+
+The store holds **one repo at a time** — re-running `ingest` rebuilds the
+collection from scratch, so switching repos or re-indexing after edits is just
+another `ingest`.
+
+Options:
+
+- `ingest`: `--db DIR` (store location), `--window N` / `--overlap M` (chunking).
+- `ask`: `--db DIR`, `-k N` (number of chunks to retrieve, default 6).
