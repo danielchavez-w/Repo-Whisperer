@@ -1,5 +1,35 @@
 # Development Log
 
+## 2026-06-02 — Step 5: Retrieval + grounded answer
+
+Added `repo_whisperer/answer.py`: the payoff step — turn a question into a
+code-grounded, cited answer. Embed the question with the same `all-MiniLM-L6-v2`
+model used for indexing, query the ChromaDB collection for the top-k nearest
+chunks, build a prompt that labels each excerpt with its `path:start-end`
+citation key, and ask `claude-opus-4-8` to answer using only those excerpts.
+
+- **Grounding contract:** a system prompt restricts the model to the provided
+  excerpts, requires inline `path:start-end` citations, and tells it to say so
+  (rather than guess) when the excerpts don't cover the question.
+- **Retrieval:** `retrieve()` returns `Hit` records (id, path, lines, text,
+  cosine distance). Default k=6; `n_results` is clamped to the collection size.
+- **Key handling:** the Anthropic client loads `ANTHROPIC_API_KEY` from `.env`
+  lazily and errors clearly if it's missing; a missing/empty collection gives an
+  actionable "run store first" message instead of a stack trace.
+- The CLI prints the answer, then the retrieved chunks with distances so the
+  grounding is visible even for citations the model didn't surface.
+
+**Verified** against the Swerve store. "where are the rails made?" → a correct
+answer that distinguishes the *visual* rails (`js/rails.js`, `initRails` /
+`updateRails`) from the *physics/collision* rails (`js/track.js:151-190`), with
+every cited line range present in the retrieved set (no hallucinated
+citations). An out-of-scope question ("how does login work?") correctly returns
+"there is no user authentication … in the provided excerpts" rather than
+inventing one — the RAG grounding holding under a negative case.
+
+**Next — Step 6:** CLI wiring so `ingest <path>` and `ask "<question>"` are
+single entry points over `store.ingest_repo` and `answer.answer_question`.
+
 ## 2026-06-02 — Step 4: Embedding + ChromaDB storage
 
 Added `repo_whisperer/store.py`: embeds each chunk locally and persists it to a
