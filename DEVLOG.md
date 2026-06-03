@@ -1,5 +1,33 @@
 # Development Log
 
+## 2026-06-03 — Session wrap-up (Phase 1 shipped)
+
+Phase 1 is complete and fully pushed to `origin/main` (through `4eea3b2`). The
+whole pipeline works behind two commands:
+
+```bash
+python -m repo_whisperer ingest <path-to-repo>
+python -m repo_whisperer ask "<question>"
+```
+
+**What got done this session:**
+- Fixed a broken `.venv` (Intel-Mac PyTorch ceiling) and pinned the stack
+  (`375e70e`) so it can't drift again.
+- Step 4 — embedding + ChromaDB storage, `store.py` (`ab3b380`).
+- Step 5 — retrieval + grounded, cited answers, `answer.py` (`2ec8fb2`).
+- Step 6 — `ingest`/`ask` CLI, `cli.py` + `__main__.py` (`4eea3b2`).
+- Wired in the Anthropic key via `.env` and verified `claude-opus-4-8` reachable.
+- Verified retrieval quality on the Swerve repo and on this repo itself.
+
+**To resume later:** `cd` in, `source .venv/bin/activate`, then `ingest` the repo
+you want and `ask` away. The store holds one repo at a time. See the README
+Quickstart.
+
+**Possible next directions (all optional, none started):** automated tests; a
+relevance/distance threshold so weak chunks are dropped from context; supporting
+multiple repos/collections at once; then Phase 2 (tutoring loop) — still out of
+scope until explicitly picked up.
+
 ## 2026-06-02 — Step 6: CLI wiring (Phase 1 complete)
 
 Added `repo_whisperer/cli.py` and `repo_whisperer/__main__.py`: a single

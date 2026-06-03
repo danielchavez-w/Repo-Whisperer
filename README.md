@@ -38,6 +38,19 @@ pip install -r requirements.txt
 cp .env.example .env   # then add your ANTHROPIC_API_KEY
 ```
 
+## Quickstart
+
+```bash
+cd /path/to/Repo-Whisperer
+source .venv/bin/activate          # deps live in the venv — this step is required
+python -m repo_whisperer ingest /path/to/some-repo
+python -m repo_whisperer ask "how does X work?"
+deactivate                         # when you're done
+```
+
+The first `ask` after activating is slow (~10–20s) while the local embedding
+model loads — that's normal.
+
 ## Usage
 
 Two commands: index a repo once, then ask as many questions as you like.
