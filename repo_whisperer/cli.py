@@ -1,15 +1,17 @@
-"""Step 6 — CLI.
+"""CLI — the single entry point for Repo Whisperer.
 
-The single entry point that ties steps 2–5 together into the two commands the
-Phase 1 spec asks for:
+Ties the engine together into the commands the learner uses:
 
-    python -m repo_whisperer ingest <path-to-repo>
-    python -m repo_whisperer ask "<question>"
+    python -m repo_whisperer ingest <path-to-repo>     # index a repo
+    python -m repo_whisperer ask "<question>"          # grounded, cited answer
+    python -m repo_whisperer explore "<where is X>"    # show code + offer to teach
 
 `ingest` walks → chunks → embeds → stores a repo (rebuilding the collection);
-`ask` retrieves the most relevant chunks and prints a grounded, cited answer.
-Both default to the `chroma_db/` store, so a typical session is one `ingest`
-followed by as many `ask`s as you like.
+`ask` retrieves the most relevant chunks and prints a grounded, cited answer
+(Phase 1). `explore` is the first Phase 2 tutoring beat: it shows the relevant
+code, then offers a specific invitation to be taught how it works. All default
+to the `chroma_db/` store, so a typical session is one `ingest` followed by as
+many `ask`s and `explore`s as you like.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from repo_whisperer.store import (
     DEFAULT_WINDOW,
     ingest_repo,
 )
+from repo_whisperer.tutor import explore
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
@@ -52,6 +55,15 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     print(f"Retrieved {len(hits)} chunks (cosine distance, lower = closer):")
     for h in hits:
         print(f"  {h.distance:.3f}  {h.id}")
+    return 0
+
+
+def _cmd_explore(args: argparse.Namespace) -> int:
+    if not args.query.strip():
+        print("error: query is empty", file=sys.stderr)
+        return 1
+
+    explore(args.query, k=args.top_k, db_dir=args.db)
     return 0
 
 
@@ -97,6 +109,25 @@ def main(argv: list[str] | None = None) -> int:
         help=f"number of chunks to retrieve (default: {DEFAULT_TOP_K})",
     )
     p_ask.set_defaults(func=_cmd_ask)
+
+    p_explore = sub.add_parser(
+        "explore", help="show relevant code, then offer to teach how it works",
+        description=(
+            "Phase 2 tutoring beat: retrieve and show the most relevant code "
+            "for a 'where is X' query, then offer a specific invitation to be "
+            "taught how it works (accept or decline)."
+        ),
+    )
+    p_explore.add_argument("query", help="what you want to see, in quotes")
+    p_explore.add_argument(
+        "--db", default=DEFAULT_DB_DIR, metavar="DIR",
+        help=f"ChromaDB storage directory (default: {DEFAULT_DB_DIR})",
+    )
+    p_explore.add_argument(
+        "-k", "--top-k", type=int, default=DEFAULT_TOP_K, dest="top_k",
+        help=f"number of chunks to retrieve (default: {DEFAULT_TOP_K})",
+    )
+    p_explore.set_defaults(func=_cmd_explore)
 
     args = parser.parse_args(argv)
 

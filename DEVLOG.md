@@ -1,5 +1,33 @@
 # Development Log
 
+## 2026-06-06 — Phase 2, Step 1: show-then-offer-to-teach
+
+Started Phase 2 (the tutoring layer), built on top of the Phase 1 engine. Added
+`repo_whisperer/tutor.py` and a new `explore` CLI command.
+
+`explore "<where is X>"` runs the first tutoring beat:
+- **Show me** — reuses Phase 1 retrieval (`answer.retrieve`) to pull and print
+  the most relevant chunks (actual code + `path:start-end` citations).
+- **Offer the doorway** — one LLM call (`generate_offer`, reusing `_client` and
+  `build_context`) produces a single specific, tempting invitation derived from
+  the retrieved code, naming a real identifier (e.g. "Want me to walk you
+  through how `initRails` builds the two rail meshes?").
+- **Capture the choice** — prompts `Learn this? [y/N]` and records accept/decline
+  in an `ExploreResult` (query, hits, offer, accepted) for Step 2 to pick up.
+
+Deliberately scoped: this step shows + offers + captures only. The actual
+Socratic teaching of an accepted thread is Step 2 — no teaching content yet.
+
+Decisions worth recording:
+- Reused Phase 1 throughout (retrieval, context building, Anthropic client); no
+  re-implementation. The offer model is the Phase 1 answering model.
+- `explore` accepts `decide=False` and an injectable `input_fn` so the
+  show+offer path is callable non-interactively (and testable); `EOFError` on
+  input is treated as "not now" rather than crashing.
+- Verified: CLI registers `explore`, module imports clean, and the show/retrieval
+  path renders correctly against the current store. Offer generation (the API
+  call) to be verified by running against a real repo before commit.
+
 ## 2026-06-03 — Session wrap-up (Phase 1 shipped)
 
 Phase 1 is complete and fully pushed to `origin/main` (through `4eea3b2`). The
