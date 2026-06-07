@@ -32,8 +32,13 @@ mid-lesson). `--level` wired through the `explore` CLI command too.
 Verified offline: imports, level validation (bad level → ValueError), the
 beginner block carries the plain-English-analogy instruction, the grounding note
 survives in every level, and `--level {beginner,intermediate,advanced}` shows in
-the CLI. Live verification (teach the same thread at `beginner`, try a follow-up
-and a re-pitch, take the comprehension invitation) is the user's to run.
+the CLI.
+
+**Verified live by the user:** re-ran the orb lesson at `beginner` and actually
+followed it this time — even asked a follow-up. Notably, the original altitude
+problem was surfaced by the user admitting they didn't understand the earlier
+(Step 2) version; that honest "I don't get this" is what exposed the gap this
+step closes.
 
 ## 2026-06-06 — Phase 2, Step 2: Socratic teaching of an accepted thread
 
