@@ -1,5 +1,26 @@
 # Development Log
 
+## 2026-06-06 — Phase 2, Step 2: Socratic teaching of an accepted thread
+
+When the learner accepts the `explore` offer, we now actually teach the thread
+instead of printing a placeholder. Added `teach_thread(query, hits, offer,
+model)` to `tutor.py`: one LLM call (reusing `_client` + `build_context`, model =
+Phase 1 `ANSWER_MODEL`) that explains how the retrieved code works, in a teaching
+voice, building understanding step by step and citing `path:start-end` keys. The
+accepted offer is passed in so the teaching stays on the specific thread.
+
+- `explore`'s accept branch now calls `teach_thread` and prints it; the decline
+  branch is unchanged.
+- `ExploreResult` gained a `teaching: str | None` field, so an accepted+taught
+  interaction carries its teaching for later steps (memory in Step 4).
+- New constants: `MAX_TEACH_TOKENS = 1536` (teaching is longer than an offer or a
+  flat answer, but still bounded) and `TEACH_SYSTEM_PROMPT`.
+
+Scope: the teaching prompt explicitly does NOT quiz or set exercises — the light,
+optional comprehension invitation is Step 3, kept separate on purpose. Verified
+imports, the new `teaching` field, and that the CLI stays wired; the live
+teaching call is verified by running `explore` against a real repo and accepting.
+
 ## 2026-06-06 — Phase 2, Step 1: show-then-offer-to-teach
 
 Started Phase 2 (the tutoring layer), built on top of the Phase 1 engine. Added

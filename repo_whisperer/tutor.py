@@ -1,7 +1,6 @@
-"""Phase 2, Step 1 — Show-then-offer-to-teach.
+"""Phase 2 — the tutoring layer, built on top of the Phase 1 engine.
 
-The first tutoring beat, built on top of the Phase 1 engine. The flow has two
-parts:
+The flow has three beats; Steps 1 and 2 are implemented here:
 
 1. **Show me.** The learner asks where something is. We reuse Phase 1 retrieval
    (`answer.retrieve`) to pull the most relevant chunks and SHOW them — the
@@ -11,9 +10,13 @@ parts:
    derived from the actual retrieved code, naming a real function/concept (e.g.
    "Want me to walk you through how `initRails` builds the two rail meshes?").
    The learner accepts or declines; we capture the choice.
+3. **Teach it.** If the learner accepts, we teach that thread (`teach_thread`):
+   explain how the retrieved code works, in context and in a teaching voice,
+   building understanding step by step and citing the line ranges.
 
-This step deliberately stops at the offer: it shows, offers, and records the
-accept/decline. The actual Socratic teaching of an accepted thread is Step 2.
+Still to come: a light, optional comprehension invitation after teaching
+(Step 3), learning memory across threads (Step 4), and "what's next" nudges
+(Step 5).
 
 Run standalone:
 
@@ -38,8 +41,13 @@ from repo_whisperer.answer import (
 # The teaching offer is short by design — a single tempting sentence.
 MAX_OFFER_TOKENS: int = 200
 
-# The model that writes the offer. Reuse the Phase 1 answering model.
+# A taught thread is a few focused paragraphs — longer than an offer or a flat
+# answer, but still bounded; we're explaining one thread, not the whole repo.
+MAX_TEACH_TOKENS: int = 1536
+
+# The model that writes the offer and the teaching. Reuse the Phase 1 model.
 OFFER_MODEL: str = ANSWER_MODEL
+TEACH_MODEL: str = ANSWER_MODEL
 
 OFFER_SYSTEM_PROMPT = (
     "You are a patient expert coding tutor sitting beside a learner who is "
@@ -59,21 +67,44 @@ OFFER_SYSTEM_PROMPT = (
     "no lists, no code blocks."
 )
 
+TEACH_SYSTEM_PROMPT = (
+    "You are a patient expert coding tutor walking a curious learner through one "
+    "specific thread of a codebase. The learner has SEEN the code excerpts below "
+    "and just accepted your offer to be taught how it works. Teach it.\n\n"
+    "Rules:\n"
+    "- Ground everything ONLY in the provided excerpts. Never invent code, "
+    "files, or behavior that isn't shown; if a detail isn't in the excerpts, "
+    "say so rather than guessing.\n"
+    "- Cite the specific `path:start-end` keys as you go, so every claim is "
+    "verifiable against the code in front of them.\n"
+    "- Teach in a teaching voice — explain the WHY and the flow, don't just "
+    "restate the lines. Build understanding step by step: start from the big "
+    "picture (what this thread does and where it starts), then walk through the "
+    "key mechanism, referring to real identifiers from the code.\n"
+    "- Stay focused on the accepted thread; don't sprawl into the whole repo.\n"
+    "- Do NOT quiz the learner or set exercises — just teach. (A light, optional "
+    "comprehension check comes separately, later.)\n"
+    "- Be warm and concrete, not a flat answer dump. Aim for a few focused "
+    "paragraphs a curious adult can follow."
+)
+
 
 @dataclass
 class ExploreResult:
-    """The outcome of one show-then-offer-to-teach interaction.
+    """The outcome of one show-then-offer-to-teach(-then-teach) interaction.
 
-    Captures everything Step 2 will need to pick up an accepted thread: the
-    learner's query, the chunks they were shown, the offer we made, and whether
-    they accepted. `accepted` is None when the decision wasn't collected (e.g.
-    `decide=False` for a non-interactive caller).
+    Captures everything later steps need to pick up an accepted thread: the
+    learner's query, the chunks they were shown, the offer we made, whether they
+    accepted, and (if they did) the teaching they received. `accepted` is None
+    when the decision wasn't collected (e.g. `decide=False` for a non-interactive
+    caller); `teaching` is None unless the offer was accepted and taught.
     """
 
     query: str
     hits: list[Hit]
     offer: str
     accepted: bool | None = None
+    teaching: str | None = None
 
 
 def generate_offer(query: str, hits: list[Hit], model: str = OFFER_MODEL) -> str:
@@ -94,6 +125,40 @@ def generate_offer(query: str, hits: list[Hit], model: str = OFFER_MODEL) -> str
         model=model,
         max_tokens=MAX_OFFER_TOKENS,
         system=OFFER_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_message}],
+    )
+    return "".join(
+        block.text for block in response.content if block.type == "text"
+    ).strip()
+
+
+def teach_thread(
+    query: str,
+    hits: list[Hit],
+    offer: str,
+    model: str = TEACH_MODEL,
+) -> str:
+    """Teach the accepted thread, grounded in `hits` and cited.
+
+    Picks up where the offer left off: explains how the retrieved code works, in
+    context and in a teaching voice, building understanding step by step and
+    citing `path:start-end` keys. `offer` is passed so the teaching stays on the
+    specific thread the learner accepted. Raises ValueError (via `_client`) if
+    the API key is missing.
+    """
+    context = build_context(hits)
+    user_message = (
+        f'The learner originally asked: "{query}"\n\n'
+        f"They accepted this teaching offer:\n{offer}\n\n"
+        f"These are the code excerpts they were shown:\n\n{context}\n\n"
+        f"Now teach this thread: walk them through how it works, grounded in "
+        f"these excerpts and citing the `path:start-end` keys as you go."
+    )
+    client = _client()
+    response = client.messages.create(
+        model=model,
+        max_tokens=MAX_TEACH_TOKENS,
+        system=TEACH_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
     )
     return "".join(
@@ -152,14 +217,18 @@ def explore(
         return ExploreResult(query=query, hits=hits, offer=offer, accepted=None)
 
     accepted = _prompt_decision(offer, input_fn=input_fn)
-    if accepted:
-        print("\nGreat — I'll teach this thread.")
-        print("(Walking through it lands in Step 2; for now your choice is saved.)")
-    else:
+    if not accepted:
         print("\nNo problem — keep exploring.")
         print('Run `explore` again with whatever catches your eye.')
+        return ExploreResult(query=query, hits=hits, offer=offer, accepted=False)
 
-    return ExploreResult(query=query, hits=hits, offer=offer, accepted=accepted)
+    print("\nGreat — let's walk through it.")
+    print("-" * 60)
+    teaching = teach_thread(query, hits, offer, model=model)
+    print(teaching)
+    return ExploreResult(
+        query=query, hits=hits, offer=offer, accepted=True, teaching=teaching,
+    )
 
 
 def _main(argv: list[str]) -> int:
