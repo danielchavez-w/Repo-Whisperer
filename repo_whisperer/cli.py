@@ -27,7 +27,7 @@ from repo_whisperer.store import (
     DEFAULT_WINDOW,
     ingest_repo,
 )
-from repo_whisperer.tutor import explore
+from repo_whisperer.tutor import DEFAULT_LEVEL, LEVELS, explore
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
@@ -63,7 +63,7 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         print("error: query is empty", file=sys.stderr)
         return 1
 
-    explore(args.query, k=args.top_k, db_dir=args.db)
+    explore(args.query, k=args.top_k, db_dir=args.db, level=args.level)
     return 0
 
 
@@ -126,6 +126,10 @@ def main(argv: list[str] | None = None) -> int:
     p_explore.add_argument(
         "-k", "--top-k", type=int, default=DEFAULT_TOP_K, dest="top_k",
         help=f"number of chunks to retrieve (default: {DEFAULT_TOP_K})",
+    )
+    p_explore.add_argument(
+        "--level", choices=LEVELS, default=DEFAULT_LEVEL,
+        help=f"teaching altitude — how much jargon to assume (default: {DEFAULT_LEVEL})",
     )
     p_explore.set_defaults(func=_cmd_explore)
 

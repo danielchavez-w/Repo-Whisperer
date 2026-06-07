@@ -1,5 +1,40 @@
 # Development Log
 
+## 2026-06-07 — Phase 2, Step 3: learner calibration (altitude, follow-ups, comprehension)
+
+The task spec was revised (`PHASE_2_TASK_MODIFIED.md`) around one insight from
+testing: Step 2 taught *correct* content but pitched it at a mid-level dev's
+vocabulary, and the target learner (a curious learner, not a senior dev) couldn't
+follow it. The content was right; the altitude was wrong. Step 3 fixes that with
+three pieces, all in `tutor.py`, all reusing the existing teaching call:
+
+- **(a) Depth dial.** New `--level` flag and `level=` param with three tiers —
+  `beginner` (default; the target user — non-basic jargon must be defined in
+  plain English with an everyday analogy the first time it appears),
+  `intermediate`, `advanced`. Implemented as `LEVEL_GUIDANCE` blocks appended to
+  each system prompt via `_level_block`, with a `GROUNDING_CONTRACT_NOTE` bolted
+  on so calibration changes only assumed vocabulary — never the facts, citations,
+  or grounding. `teach_thread` now takes `level`.
+- **(b) In-lesson follow-ups.** After the lesson, `_run_followups` runs a read-loop:
+  plain-English questions are answered by `answer_followup` (grounded in the same
+  chunks + the lesson, at the chosen level). Bonus: typing `level <tier>`
+  re-teaches the same thread at a new altitude on the fly, so the learner can
+  dial it in until it lands. Blank line / `done` exits; EOF is handled.
+- **(c) Light comprehension invitation.** `_run_comprehension` then offers an
+  optional predict/modify/explain-back prompt (`comprehension_challenge`); if the
+  learner attempts it, `evaluate_response` replies supportively. Skippable — an
+  invitation, never a quiz.
+
+Refactored the repeated Anthropic single-turn call into `_ask_model`. `ExploreResult`
+gained a `level` field (the level in effect at the end, since it can change
+mid-lesson). `--level` wired through the `explore` CLI command too.
+
+Verified offline: imports, level validation (bad level → ValueError), the
+beginner block carries the plain-English-analogy instruction, the grounding note
+survives in every level, and `--level {beginner,intermediate,advanced}` shows in
+the CLI. Live verification (teach the same thread at `beginner`, try a follow-up
+and a re-pitch, take the comprehension invitation) is the user's to run.
+
 ## 2026-06-06 — Phase 2, Step 2: Socratic teaching of an accepted thread
 
 When the learner accepts the `explore` offer, we now actually teach the thread
