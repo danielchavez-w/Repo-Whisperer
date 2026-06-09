@@ -5,13 +5,16 @@ The flow:
 1. **Show me.** The learner asks where something is. We reuse Phase 1 retrieval
    (`answer.retrieve`) to pull the most relevant chunks and SHOW them — the
    actual code, with `path:start-end` citations.
-2. **Offer the doorway.** Having seen the code, the learner is asked if they want
-   to learn it. By default this is a plain invitation ("Want to learn this?") that
-   teaches the thread they searched for. ONLY when the learning memory holds a
-   genuine connection to a past lesson do we make a SPECIFIC offer that names the
-   tie (e.g. "Want to see how this ties into your earlier lesson on `initRails`?").
-   The learner accepts or declines. On a decline we don't dead-end — we ask what
-   they'd rather learn and teach that instead.
+2. **Answer, then offer the doorway.** Having seen the code, the learner first
+   gets a short, direct answer to the question they asked (`quick_answer`) — so a
+   "how does X work?" ask is always answered up front, never gated behind
+   accepting a lesson. Then they're asked if they want to go deeper. By default
+   this is a plain invitation that teaches the thread they searched for; it
+   becomes a SPECIFIC offer naming a tie when the learning memory holds a genuine
+   connection to a past lesson (e.g. "Want to see how this ties into your earlier
+   lesson on `initRails`?"), or a "you've explored this before — want a
+   refresher?" prompt when the topic was already covered. On a decline we don't
+   dead-end — we ask what they'd rather learn and teach that instead.
 3. **Teach it — at the learner's altitude.** If the learner accepts, we teach
    that thread (`teach_thread`), pitched at their chosen `level`
    (beginner/intermediate/advanced). The SAME grounded, cited content is
@@ -63,6 +66,10 @@ MAX_TEACH_TOKENS: int = 4096
 # follow-up "keep going" calls _ask_model may make to finish a truncated reply.
 MAX_TEACH_CONTINUATIONS: int = 2
 
+# The upfront direct answer is brief by design — a couple of sentences that
+# answer the question itself before any deeper lesson is offered.
+MAX_QUICK_ANSWER_TOKENS: int = 256
+
 # Follow-ups, challenges, and evaluations are shorter, focused replies.
 MAX_FOLLOWUP_TOKENS: int = 800
 MAX_CHALLENGE_TOKENS: int = 300
@@ -78,12 +85,6 @@ MAX_NUDGES: int = 3
 # Wider than a normal retrieval so something usually survives the filtering of
 # already-shown and already-covered chunks.
 NUDGE_CANDIDATE_K: int = 12
-
-# Cosine distance above which a retrieved chunk is a weak match. Strong hits sit
-# well below this (~0.3); when EVERY retrieved chunk is above it, the query
-# wording probably doesn't appear in the repo, so we say so plainly instead of
-# passing off loosely related code as a real answer.
-WEAK_MATCH_DISTANCE: float = 0.6
 
 # Every tutoring call reuses the Phase 1 answering model.
 OFFER_MODEL: str = ANSWER_MODEL
@@ -181,6 +182,20 @@ CONNECTION_OFFER_SYSTEM_PROMPT = (
     "past topic and the tie, e.g. \"Want to see how this reuses the same buffer "
     "setup you saw in `initRails`?\" Name real identifiers from the excerpts.\n"
     "- No preamble, no lists, no code blocks — just the sentence or the sentinel."
+)
+
+QUICK_ANSWER_SYSTEM_PROMPT = (
+    "You are a patient expert coding tutor. The learner asked a question and has "
+    "just been shown the relevant code excerpts. Give a SHORT, direct answer to "
+    "what they actually asked — 2-3 sentences, no more.\n\n"
+    "Rules:\n"
+    "- Answer the question itself, plainly and up front. This is the immediate "
+    "answer; a deeper guided walkthrough is offered separately, so do NOT teach "
+    "in layers or pad it — just answer.\n"
+    "- Ground it strictly in the provided excerpts and cite the relevant "
+    "`path:start-end` key(s). If the excerpts don't actually contain the answer, "
+    "say so plainly rather than inventing.\n"
+    "- No preamble, no headers, no lists — just the couple of sentences."
 )
 
 TEACH_SYSTEM_PROMPT = (
@@ -389,6 +404,32 @@ def _prior_note(prior: str) -> str:
     )
 
 
+def quick_answer(
+    query: str,
+    hits: list[Hit],
+    level: str = DEFAULT_LEVEL,
+    model: str = TEACH_MODEL,
+) -> str:
+    """Answer the learner's question directly in 2-3 sentences, grounded in `hits`.
+
+    This is the upfront answer shown right after the code, before any deeper
+    lesson is offered — so a "how does X work?" question is always answered, not
+    gated behind accepting a walkthrough. Pitched at `level` (vocabulary only);
+    the facts and citations are unchanged. Raises ValueError on an unknown level
+    or a missing API key.
+    """
+    _check_level(level)
+    context = build_context(hits)
+    user_message = (
+        f'The learner asked: "{query}"\n\n'
+        f"The code excerpts they were just shown:\n\n{context}\n\n"
+        f"Answer their question directly in 2-3 sentences, grounded in these "
+        f"excerpts and citing the `path:start-end` key(s)."
+    )
+    system = f"{QUICK_ANSWER_SYSTEM_PROMPT}\n\n{_level_block(level)}"
+    return _ask_model(system, user_message, MAX_QUICK_ANSWER_TOKENS, model)
+
+
 def teach_thread(
     query: str,
     hits: list[Hit],
@@ -396,6 +437,7 @@ def teach_thread(
     level: str = DEFAULT_LEVEL,
     prior: str = "",
     model: str = TEACH_MODEL,
+    note: str = "",
 ) -> str:
     """Teach the accepted thread, grounded in `hits`, cited, and pitched at `level`.
 
@@ -405,14 +447,18 @@ def teach_thread(
     carries a connection to a past lesson the lesson can lean into. `level`
     controls only the assumed vocabulary, not the facts. `prior` is an optional
     brief of threads already covered, so the lesson can cross-reference them.
-    Raises ValueError on an unknown level or a missing API key.
+    `note`, when non-empty, is extra pitching guidance — used to flag a refresher
+    of a thread the learner already explored so the lesson builds on it rather
+    than starting cold. Raises ValueError on an unknown level or a missing API key.
     """
     _check_level(level)
     context = build_context(hits)
     offer_line = f"They accepted this teaching offer:\n{offer}\n\n" if offer else ""
+    note_line = f"{note}\n\n" if note else ""
     user_message = (
         f'The learner originally asked: "{query}"\n\n'
         f"{offer_line}"
+        f"{note_line}"
         f"These are the code excerpts they were shown:\n\n{context}\n\n"
         f"Now teach this thread: walk them through how it works, grounded in "
         f"these excerpts and citing the `path:start-end` keys as you go."
@@ -551,31 +597,14 @@ def format_hits(query: str, hits: list[Hit]) -> str:
     return "\n".join(lines)
 
 
-def _weak_match_note(hits: list[Hit]) -> str:
-    """A heads-up when nothing strongly matches the query, else "".
-
-    Retrieval always returns the top-k chunks no matter how weak the match is.
-    When every one of them is above WEAK_MATCH_DISTANCE, none is a confident
-    hit — usually because the learner's wording doesn't appear in this repo — so
-    we flag that and name the closest file as a best guess, rather than letting
-    them assume the code shown is really what they asked about.
-    """
-    if not hits or any(h.distance <= WEAK_MATCH_DISTANCE for h in hits):
-        return ""
-    closest = min(hits, key=lambda h: h.distance)
-    return (
-        "\n⚠  Nothing in this repo closely matches your wording, so the code "
-        f"above is only loosely related — the closest guess is `{closest.path}`. "
-        "Try rephrasing with a term from the codebase if this isn't what you meant."
-    )
-
-
 def _show_hits(query: str, hits: list[Hit], lead: str = "") -> None:
-    """Print the retrieved code for `query`, plus a weak-match heads-up if warranted."""
+    """Print the retrieved code for `query`.
+
+    A thin wrapper so every learner-query display site (initial, redirect, and
+    nudge-chosen) renders the same way; `lead` prepends a separator (e.g. "\\n")
+    where the surrounding output needs it.
+    """
     print(lead + format_hits(query, hits))
-    note = _weak_match_note(hits)
-    if note:
-        print(note)
 
 
 # Natural affirmatives that count as "yes" at a [Y/n] prompt. A learner shouldn't
@@ -590,26 +619,58 @@ _AFFIRMATIVES: frozenset[str] = frozenset({
 })
 
 
-def _prompt_decision(offer: str, input_fn=input) -> bool:
+def _read_yes(prompt: str, input_fn=input) -> bool:
+    """Read a [Y/n] reply, counting any natural affirmative (see `_AFFIRMATIVES`).
+
+    Returns False on EOF so a non-interactive stream never barrels into a lesson
+    uninvited.
+    """
+    try:
+        return input_fn(prompt).strip().lower() in _AFFIRMATIVES
+    except EOFError:
+        return False
+
+
+def _refresher_note(thread: "learning.Thread") -> str:
+    """Pitching guidance for re-teaching a thread the learner already explored.
+
+    Tells the teaching prompt to acknowledge the prior visit and build on it, and
+    — when last time's offer named a connection — what they tied it to before.
+    """
+    conn = ""
+    if thread.offer and thread.offer.strip().upper() != NO_CONNECTION_SENTINEL:
+        conn = f' Last time it was framed as: "{thread.offer.strip()}".'
+    return (
+        f'This is a REFRESHER — the learner already explored this thread (as '
+        f'"{thread.topic}", at the \'{thread.level}\' level).{conn} Briefly '
+        f"acknowledge they've seen it before and build on it rather than teaching "
+        f"it cold from scratch."
+    )
+
+
+def _prompt_decision(offer: str, input_fn=input, revisit: "learning.Thread | None" = None) -> bool:
     """Ask whether to learn the thread, defaulting to yes. Returns accepted.
 
-    When `offer` is non-empty (a genuine connection to a past lesson) it's shown
-    as the invitation; otherwise the prompt is the plain "Want to learn this?".
-    Accepts any natural affirmative (see `_AFFIRMATIVES`), not just "y"/"yes", so
-    a casual "sure" or "yeah" doesn't silently get read as a decline.
+    When `revisit` is a previously-covered thread, the learner is told they've
+    seen this before and offered a refresher. Otherwise, when `offer` is
+    non-empty (a genuine connection to a past lesson) it's shown as the
+    invitation; failing both, the prompt is the plain offer of a full
+    walkthrough. Accepts any natural affirmative (see `_AFFIRMATIVES`), not just
+    "y"/"yes", so a casual "sure" or "yeah" doesn't silently read as a decline.
     """
     print("\n" + "=" * 60)
-    if offer:
+    if revisit is not None:
+        print(
+            f"↩  You've explored this before — taught as \"{revisit.topic}\" "
+            f"at the '{revisit.level}' level."
+        )
+        prompt = "Want a refresher? [Y/n] "
+    elif offer:
         print(f"💡 {offer}")
         prompt = "\nLearn this? [Y/n] "
     else:
-        prompt = "Want to learn this? [Y/n] "
-    try:
-        reply = input_fn(prompt).strip().lower()
-    except EOFError:
-        # No interactive input available — don't barrel into a lesson uninvited.
-        return False
-    return reply in _AFFIRMATIVES
+        prompt = "Want me to walk through how it works in depth? [Y/n] "
+    return _read_yes(prompt, input_fn)
 
 
 def _prompt_redirect(input_fn=input) -> str:
@@ -631,6 +692,7 @@ def _run_followups(
     prior: str,
     model: str,
     input_fn,
+    note: str = "",
 ) -> tuple[str, str, bool]:
     """Let the learner ask follow-ups and re-pitch the level until they're done.
 
@@ -667,7 +729,8 @@ def _run_followups(
                 print(f"\nRe-teaching at the '{level}' level.")
                 print("-" * 60)
                 teaching = teach_thread(
-                    query, hits, offer, level=level, prior=prior, model=model
+                    query, hits, offer, level=level, prior=prior, model=model,
+                    note=note,
                 )
                 print(teaching)
             continue
@@ -725,19 +788,25 @@ def _deliver_lesson(
     prior: str,
     model: str,
     input_fn,
+    note: str = "",
 ) -> tuple[str, str, bool]:
     """Teach `query` (grounded in `hits`), then run follow-ups and comprehension.
 
-    Shared by the accept path and the on-decline redirect path. Returns the final
-    lesson text, the level in effect at exit, and whether the learner engaged.
+    Shared by the accept, on-decline redirect, and nudge paths. `note` is extra
+    pitching guidance (e.g. a refresher acknowledgment) passed through to the
+    teaching call. Returns the final lesson text, the level in effect at exit,
+    and whether the learner engaged.
     """
-    print(f"\nGreat — let's walk through it (at the '{level}' level).")
+    opener = "let's revisit it" if note else "let's walk through it"
+    print(f"\nGreat — {opener} (at the '{level}' level).")
     print("-" * 60)
-    teaching = teach_thread(query, hits, offer, level=level, prior=prior, model=model)
+    teaching = teach_thread(
+        query, hits, offer, level=level, prior=prior, model=model, note=note,
+    )
     print(teaching)
 
     teaching, level, asked = _run_followups(
-        query, hits, offer, teaching, level, prior, model, input_fn,
+        query, hits, offer, teaching, level, prior, model, input_fn, note=note,
     )
     attempted = _run_comprehension(query, hits, teaching, level, model, input_fn)
     return teaching, level, asked or attempted
@@ -831,11 +900,14 @@ def explore(
 
     Loads learning state from `state_path` (set None to disable persistence) and
     resolves the level as: explicit `level` → the saved level → `beginner`.
-    Retrieves and prints the relevant chunks, then asks whether to learn the
-    thread. The invitation is plain by default; it becomes a specific offer only
-    when the learning memory holds a genuine connection to a past lesson. On
-    accept it teaches the thread the learner searched for; on decline it asks what
-    they'd rather learn and teaches that instead (never a dead end). The lesson is
+    Retrieves and prints the relevant chunks, gives a short direct answer to the
+    question up front, then asks whether to go deeper. The invitation is plain by
+    default; it becomes a specific offer only when the learning memory holds a
+    genuine connection to a past lesson, or a refresher prompt when this topic was
+    already explored (recognized via `find_revisit`). On accept it teaches the
+    thread the learner searched for — building on the prior visit when it's a
+    refresher; on decline it asks what they'd rather learn and teaches that
+    instead (never a dead end). The lesson is
     handed a brief of previously covered threads for cross-references, runs the
     in-lesson follow-up loop, and offers an optional comprehension invitation. The
     covered thread and final level are then saved. After the lesson, related
@@ -856,19 +928,38 @@ def explore(
     hits = retrieve(query, k=k, db_dir=db_dir)
     _show_hits(query, hits)
 
-    # A specific offer is made ONLY when memory yields a genuine connection;
-    # otherwise the prompt is plain and we skip the offer call entirely.
+    # Recognize a re-asked topic as review, not new ground (feature 2): if this
+    # retrieval re-treads a thread already taught, we offer a refresher.
+    revisit = state.find_revisit([h.id for h in hits])
     prior = state.prior_brief(exclude_citations=[h.id for h in hits])
-    offer = generate_offer(query, hits, prior=prior, model=model) if prior else ""
+    # A specific connection offer is made ONLY for new ground that ties to a past
+    # lesson; a revisit gets the refresher prompt instead, so skip the offer call.
+    offer = (
+        ""
+        if revisit is not None
+        else (generate_offer(query, hits, prior=prior, model=model) if prior else "")
+    )
 
     if not decide:
         print("\n" + "=" * 60)
-        print(f"💡 {offer}" if offer else "Want to learn this? [Y/n]")
+        if revisit is not None:
+            print("↩  You've explored this before — want a refresher? [Y/n]")
+        else:
+            print(f"💡 {offer}" if offer else "Want to learn this? [Y/n]")
         return ExploreResult(
             query=query, hits=hits, offer=offer, accepted=None, level=level,
         )
 
-    if not _prompt_decision(offer, input_fn=input_fn):
+    # Answer the question itself up front (feature 1), before offering the deeper
+    # lesson — so a "how does X work?" ask is always answered, not gated behind
+    # accepting a walkthrough.
+    print("\nShort answer")
+    print("-" * 60)
+    print(quick_answer(query, hits, level=level, model=model))
+
+    note = _refresher_note(revisit) if revisit is not None else ""
+
+    if not _prompt_decision(offer, input_fn=input_fn, revisit=revisit):
         redirect = _prompt_redirect(input_fn=input_fn)
         if not redirect:
             print("\nNo problem — keep exploring.")
@@ -876,15 +967,18 @@ def explore(
             return ExploreResult(
                 query=query, hits=hits, offer=offer, accepted=False, level=level,
             )
-        # Teach what they'd rather learn instead, grounded in its own code.
+        # Teach what they'd rather learn instead, grounded in its own code —
+        # which may itself be a topic they've covered, so re-check for a revisit.
         query = redirect
         hits = retrieve(query, k=k, db_dir=db_dir)
         _show_hits(query, hits)
         offer = ""
+        revisit = state.find_revisit([h.id for h in hits])
+        note = _refresher_note(revisit) if revisit is not None else ""
         prior = state.prior_brief(exclude_citations=[h.id for h in hits])
 
     teaching, level, engaged = _deliver_lesson(
-        query, hits, offer, level, prior, model, input_fn,
+        query, hits, offer, level, prior, model, input_fn, note=note,
     )
 
     state.record_thread(

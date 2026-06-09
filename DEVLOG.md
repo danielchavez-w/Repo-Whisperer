@@ -1,5 +1,38 @@
 # Development Log
 
+## 2026-06-09 — Explore polish: answer up front, revisit refreshers, drop the weak-match warning
+
+Post-Phase-2 refinements to the `explore` flow, surfaced by live use (all in
+`tutor.py` unless noted; not yet committed at time of writing).
+
+- **Answer the question up front.** After showing the code, `explore` now prints
+  a short "Short answer" — a direct 2-3 sentence grounded, cited reply to the
+  question itself (new `quick_answer`) — *before* offering the deeper lesson. A
+  "how does X work?" ask is always answered, never gated behind accepting a
+  walkthrough. Pitched at the learner's level (vocabulary only; facts unchanged).
+
+- **Re-asked topics become refreshers.** `LearningState.find_revisit` (in
+  `learning.py`) recognizes when a query re-treads an already-taught thread by
+  citation overlap (≥2 shared chunks, or a short thread fully re-hit). When it
+  does, the prompt becomes "↩ You've explored this before — want a refresher?"
+  instead of a fresh offer, and the re-teach is handed a `_refresher_note` so it
+  acknowledges the prior visit and builds on it (including what it was connected
+  to last time). Applies on the decline→redirect path too. No special command —
+  re-asking a covered topic just works as review.
+
+- **Removed the weak-match heads-up.** The distance-threshold warning (the old
+  `WEAK_MATCH_DISTANCE` / `_weak_match_note`) is gone. It fired on good matches:
+  e.g. "how does the audio work" correctly returned `js/audio.js` with a correct
+  short answer but still printed "Nothing in this repo closely matches." The
+  closest-hit distances for a genuinely-absent feature (~0.68) and a real feature
+  worded differently (~0.65) sit in a ~0.025 band, so a single global threshold
+  can't reliably tell "feature doesn't exist" from "feature exists, worded
+  differently" — it did more harm than good. `_show_hits` is now a thin wrapper
+  that just renders the chunks. **Intended future replacement: model-judged
+  relevance** — let the model decide whether the retrieved chunks actually answer
+  the question (and say so honestly when they don't), rather than thresholding a
+  cosine distance. The short-answer call is already a natural place to hang this.
+
 ## 2026-06-09 — Phase 2, Step 5: "what's next" nudges (Phase 2 complete)
 
 The last step of Phase 2. After a lesson, the tutor stops dropping the learner

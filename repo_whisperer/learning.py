@@ -110,6 +110,29 @@ class LearningState:
         self.threads.append(thread)
         return thread
 
+    def find_revisit(self, hit_ids: list[str], *, min_overlap: int = 2) -> "Thread | None":
+        """Return the covered thread this retrieval re-treads, or None.
+
+        A revisit is recognized when freshly retrieved chunks substantially
+        overlap a thread already taught — at least `min_overlap` shared
+        citations, or every citation of that thread (so a short, fully re-hit
+        thread still counts). The best-overlapping thread wins. This is how a
+        re-asked topic is recognized as review rather than treated as new
+        ground, with no special command needed from the learner.
+        """
+        current = set(hit_ids)
+        best: Thread | None = None
+        best_overlap = 0
+        for t in self.threads:
+            cites = set(t.citations)
+            overlap = len(current & cites)
+            if overlap == 0:
+                continue
+            strong = overlap >= min_overlap or overlap == len(cites)
+            if strong and overlap > best_overlap:
+                best, best_overlap = t, overlap
+        return best
+
     def prior_brief(
         self, *, exclude_citations: list[str] | None = None, limit: int = _PRIOR_LIMIT
     ) -> str:
