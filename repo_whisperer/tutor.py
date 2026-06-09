@@ -22,8 +22,12 @@ The flow:
 4. **Remember it across sessions.** State (the chosen level + covered threads)
    persists via `learning`. The level carries over between runs, and each new
    lesson is handed a brief of earlier threads so it can cross-reference them.
-
-Still to come: "what's next" nudges (Step 5).
+5. **Nudge what's next.** After a lesson, the tutor pulls related code the
+   learner has NOT been taught yet (neighbors of the lesson in the store, minus
+   everything already shown or covered) and suggests up to a few specific
+   threads they might be curious about. Suggestions only — the learner picks
+   one, types their own topic, or stops. Each accepted nudge runs the full
+   lesson flow and is remembered, then fresh nudges follow from there.
 
 Run standalone:
 
@@ -33,6 +37,7 @@ Run standalone:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass
 
@@ -62,6 +67,23 @@ MAX_TEACH_CONTINUATIONS: int = 2
 MAX_FOLLOWUP_TOKENS: int = 800
 MAX_CHALLENGE_TOKENS: int = 300
 MAX_EVAL_TOKENS: int = 600
+
+# "What's next" nudges are a handful of one-line invitations.
+MAX_NUDGE_TOKENS: int = 400
+
+# At most this many next-thread suggestions per nudge.
+MAX_NUDGES: int = 3
+
+# How many chunks to pull when hunting for unexplored neighbors of a lesson.
+# Wider than a normal retrieval so something usually survives the filtering of
+# already-shown and already-covered chunks.
+NUDGE_CANDIDATE_K: int = 12
+
+# Cosine distance above which a retrieved chunk is a weak match. Strong hits sit
+# well below this (~0.3); when EVERY retrieved chunk is above it, the query
+# wording probably doesn't appear in the repo, so we say so plainly instead of
+# passing off loosely related code as a real answer.
+WEAK_MATCH_DISTANCE: float = 0.6
 
 # Every tutoring call reuses the Phase 1 answering model.
 OFFER_MODEL: str = ANSWER_MODEL
@@ -213,6 +235,32 @@ EVAL_SYSTEM_PROMPT = (
     "they got right, gently correct or fill any gaps, and stay grounded in the "
     "excerpts (cite `path:start-end` where it helps). Never condescend or grade. "
     "Close by inviting them to keep going."
+)
+
+# Returned by the nudge prompt when none of the candidate code is genuinely
+# worth suggesting, signalling the caller to end the session gracefully.
+NO_NUDGE_SENTINEL: str = "NONE"
+
+NUDGE_SYSTEM_PROMPT = (
+    "You are a patient expert coding tutor. The learner just finished a lesson "
+    "on one thread of a codebase. You are given that lesson, a list of threads "
+    "they have ALREADY covered, and candidate code excerpts from the SAME repo "
+    "that they have NOT been taught yet. Suggest what they might be curious "
+    "about next.\n\n"
+    "Rules:\n"
+    f"- Suggest at most {MAX_NUDGES} threads, each grounded in the candidate "
+    "excerpts — name a REAL function, class, or identifier that appears in "
+    "them, using its exact name.\n"
+    "- Prefer threads that genuinely relate to what was just learned (a caller "
+    "or callee, shared data, the next step in the same flow) and steer AWAY "
+    "from the threads already covered.\n"
+    "- Phrase each as a short, tempting one-line invitation, one per line, "
+    "numbered, e.g. \"1. Want to see how `spawnOrbs` decides where each orb "
+    "appears?\"\n"
+    "- These are suggestions, never pressure. No preamble, no explanations, no "
+    "code blocks — just the numbered lines.\n"
+    f"- If none of the candidates is genuinely worth suggesting, respond with "
+    f"exactly {NO_NUDGE_SENTINEL} and nothing else."
 )
 
 
@@ -438,6 +486,57 @@ def evaluate_response(
     return _ask_model(system, user_message, MAX_EVAL_TOKENS, model)
 
 
+def _next_candidates(
+    query: str,
+    db_dir: str,
+    exclude: set[str],
+    k: int = NUDGE_CANDIDATE_K,
+) -> list[Hit]:
+    """Pull chunks related to `query` that the learner hasn't met yet.
+
+    Retrieves wider than a normal lesson, then drops every chunk id in
+    `exclude` (chunks just shown plus everything cited by covered threads), so
+    what remains is genuinely unexplored neighboring code. May return [] —
+    e.g. in a small repo where the learner has seen most of it.
+    """
+    neighbors = retrieve(query, k=k, db_dir=db_dir)
+    return [h for h in neighbors if h.id not in exclude]
+
+
+def suggest_next_threads(
+    query: str,
+    lesson: str,
+    covered: str,
+    candidates: list[Hit],
+    model: str = TEACH_MODEL,
+) -> list[str]:
+    """Suggest up to MAX_NUDGES unexplored threads to be curious about next.
+
+    Each suggestion is a one-line invitation grounded in the `candidates`
+    excerpts (code the learner has NOT been taught), steered away from the
+    `covered` brief. Returns [] when the model judges nothing genuinely worth
+    suggesting — no manufactured nudges.
+    """
+    context = build_context(candidates)
+    user_message = (
+        f'The learner was just taught a lesson on: "{query}"\n\n'
+        f"The lesson:\n{lesson}\n\n"
+        f"Threads already covered:\n{covered or '(only this one so far)'}\n\n"
+        f"Candidate UNEXPLORED code excerpts from the same repo:\n\n{context}\n\n"
+        f"Suggest up to {MAX_NUDGES} next threads, or reply "
+        f"{NO_NUDGE_SENTINEL} if none are genuinely worth suggesting."
+    )
+    raw = _ask_model(NUDGE_SYSTEM_PROMPT, user_message, MAX_NUDGE_TOKENS, model)
+    if raw.strip().upper().startswith(NO_NUDGE_SENTINEL):
+        return []
+    suggestions: list[str] = []
+    for line in raw.splitlines():
+        text = re.sub(r"^\s*(?:\d+[.)]|[-*•])\s*", "", line).strip()
+        if text:
+            suggestions.append(text)
+    return suggestions[:MAX_NUDGES]
+
+
 def format_hits(query: str, hits: list[Hit]) -> str:
     """Render the retrieved chunks as a readable 'here is the code' view."""
     lines = [
@@ -452,11 +551,52 @@ def format_hits(query: str, hits: list[Hit]) -> str:
     return "\n".join(lines)
 
 
+def _weak_match_note(hits: list[Hit]) -> str:
+    """A heads-up when nothing strongly matches the query, else "".
+
+    Retrieval always returns the top-k chunks no matter how weak the match is.
+    When every one of them is above WEAK_MATCH_DISTANCE, none is a confident
+    hit — usually because the learner's wording doesn't appear in this repo — so
+    we flag that and name the closest file as a best guess, rather than letting
+    them assume the code shown is really what they asked about.
+    """
+    if not hits or any(h.distance <= WEAK_MATCH_DISTANCE for h in hits):
+        return ""
+    closest = min(hits, key=lambda h: h.distance)
+    return (
+        "\n⚠  Nothing in this repo closely matches your wording, so the code "
+        f"above is only loosely related — the closest guess is `{closest.path}`. "
+        "Try rephrasing with a term from the codebase if this isn't what you meant."
+    )
+
+
+def _show_hits(query: str, hits: list[Hit], lead: str = "") -> None:
+    """Print the retrieved code for `query`, plus a weak-match heads-up if warranted."""
+    print(lead + format_hits(query, hits))
+    note = _weak_match_note(hits)
+    if note:
+        print(note)
+
+
+# Natural affirmatives that count as "yes" at a [Y/n] prompt. A learner shouldn't
+# have to know the one magic letter — "yeah", "sure", "ok" all plainly mean yes,
+# and Enter (the empty string) takes the capital-Y default. Anything not in here
+# is treated as a decline, which routes to the "what would you rather learn?"
+# redirect rather than a dead end.
+_AFFIRMATIVES: frozenset[str] = frozenset({
+    "", "y", "yes", "yeah", "yea", "yep", "yup", "ya", "yah", "sure", "ok",
+    "okay", "k", "yes please", "go", "go on", "go ahead", "please", "do it",
+    "let's go", "lets go", "absolutely", "definitely",
+})
+
+
 def _prompt_decision(offer: str, input_fn=input) -> bool:
     """Ask whether to learn the thread, defaulting to yes. Returns accepted.
 
     When `offer` is non-empty (a genuine connection to a past lesson) it's shown
     as the invitation; otherwise the prompt is the plain "Want to learn this?".
+    Accepts any natural affirmative (see `_AFFIRMATIVES`), not just "y"/"yes", so
+    a casual "sure" or "yeah" doesn't silently get read as a decline.
     """
     print("\n" + "=" * 60)
     if offer:
@@ -469,7 +609,7 @@ def _prompt_decision(offer: str, input_fn=input) -> bool:
     except EOFError:
         # No interactive input available — don't barrel into a lesson uninvited.
         return False
-    return reply in {"", "y", "yes"}
+    return reply in _AFFIRMATIVES
 
 
 def _prompt_redirect(input_fn=input) -> str:
@@ -603,6 +743,80 @@ def _deliver_lesson(
     return teaching, level, asked or attempted
 
 
+def _run_nudges(
+    query: str,
+    hits: list[Hit],
+    lesson: str,
+    level: str,
+    state: learning.LearningState,
+    state_path: str | None,
+    k: int,
+    db_dir: str,
+    model: str,
+    input_fn,
+) -> str:
+    """After a lesson, suggest related unexplored threads until the learner stops.
+
+    Each round retrieves neighbors of the last lesson, filters out everything
+    already shown or covered, and asks for up to MAX_NUDGES grounded
+    suggestions. The learner picks one by number, types their own topic, or
+    presses Enter to stop — always their call. An accepted nudge runs the full
+    lesson flow (teach, follow-ups, comprehension), is recorded to the learning
+    memory, and then fresh nudges follow from the new lesson. Returns the level
+    in effect at exit.
+    """
+    while True:
+        seen = {h.id for h in hits}
+        seen.update(c for t in state.threads for c in t.citations)
+        candidates = _next_candidates(query, db_dir=db_dir, exclude=seen)
+        suggestions = (
+            suggest_next_threads(
+                query, lesson, state.prior_brief(), candidates, model=model
+            )
+            if candidates
+            else []
+        )
+        if not suggestions:
+            print("\nThat thread's all wrapped up — run `explore` again whenever")
+            print("something else catches your eye.")
+            return level
+
+        print("\n" + "=" * 60)
+        print("Curious where to go next? You might like:")
+        for i, suggestion in enumerate(suggestions, 1):
+            print(f"  {i}. {suggestion}")
+        try:
+            line = input_fn(
+                "\n(type a number, your own topic, or press Enter to stop) > "
+            ).strip()
+        except EOFError:
+            return level
+        if not line:
+            print("\nHappy exploring — run `explore` again any time.")
+            return level
+
+        query = (
+            suggestions[int(line) - 1]
+            if line.isdigit() and 1 <= int(line) <= len(suggestions)
+            else line
+        )
+        hits = retrieve(query, k=k, db_dir=db_dir)
+        _show_hits(query, hits, lead="\n")
+        prior = state.prior_brief(exclude_citations=[h.id for h in hits])
+        lesson, level, engaged = _deliver_lesson(
+            query, hits, "", level, prior, model, input_fn,
+        )
+        state.record_thread(
+            query=query,
+            offer="",
+            citations=[h.id for h in hits],
+            level=level,
+            engaged=engaged,
+        )
+        state.level = level
+        learning.save_state(state, state_path)
+
+
 def explore(
     query: str,
     k: int = DEFAULT_TOP_K,
@@ -624,7 +838,10 @@ def explore(
     they'd rather learn and teaches that instead (never a dead end). The lesson is
     handed a brief of previously covered threads for cross-references, runs the
     in-lesson follow-up loop, and offers an optional comprehension invitation. The
-    covered thread and final level are then saved. Returns an `ExploreResult`.
+    covered thread and final level are then saved. After the lesson, related
+    unexplored threads are suggested (`_run_nudges`) until the learner stops;
+    each accepted nudge is taught and remembered too. Returns an `ExploreResult`
+    describing the original thread.
     """
     state = learning.load_state(state_path)
     level = level or state.level or DEFAULT_LEVEL
@@ -637,7 +854,7 @@ def explore(
         )
 
     hits = retrieve(query, k=k, db_dir=db_dir)
-    print(format_hits(query, hits))
+    _show_hits(query, hits)
 
     # A specific offer is made ONLY when memory yields a genuine connection;
     # otherwise the prompt is plain and we skip the offer call entirely.
@@ -662,7 +879,7 @@ def explore(
         # Teach what they'd rather learn instead, grounded in its own code.
         query = redirect
         hits = retrieve(query, k=k, db_dir=db_dir)
-        print(format_hits(query, hits))
+        _show_hits(query, hits)
         offer = ""
         prior = state.prior_brief(exclude_citations=[h.id for h in hits])
 
@@ -680,13 +897,21 @@ def explore(
     state.level = level
     learning.save_state(state, state_path)
 
+    # Step 5 — suggest what to explore next, until the learner says stop.
+    final_level = _run_nudges(
+        query, hits, teaching, level, state, state_path, k, db_dir, model, input_fn,
+    )
+    if final_level != state.level:
+        state.level = final_level
+        learning.save_state(state, state_path)
+
     return ExploreResult(
         query=query,
         hits=hits,
         offer=offer,
         accepted=True,
         teaching=teaching,
-        level=level,
+        level=final_level,
     )
 
 

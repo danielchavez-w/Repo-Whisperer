@@ -1,5 +1,58 @@
 # Development Log
 
+## 2026-06-09 — Phase 2, Step 5: "what's next" nudges (Phase 2 complete)
+
+The last step of Phase 2. After a lesson, the tutor stops dropping the learner
+back to the shell and instead suggests related threads they haven't explored
+yet — pull, with gentle nudges, the learner always deciding.
+
+**Nudges (`tutor.py`).** Once a lesson, its follow-ups, and the optional
+comprehension invitation are done, `_run_nudges` runs a loop:
+
+- `_next_candidates` re-queries the store around the just-taught topic with a
+  wider net (`NUDGE_CANDIDATE_K = 12`), then drops every chunk already shown
+  *and* every chunk cited by any covered thread in the learning memory — so what
+  remains is genuinely related, genuinely unexplored code.
+- `suggest_next_threads` makes one grounded model call over those candidates
+  (plus the covered-threads brief) for up to `MAX_NUDGES = 3` one-line
+  invitations naming real identifiers, steered toward the lesson and away from
+  covered ground. If nothing is worth suggesting it returns the `NONE` sentinel
+  and the session wraps up gracefully rather than inventing a nudge.
+- The learner picks a suggestion by number, types their own topic, or presses
+  Enter to stop. An accepted nudge runs the full existing lesson flow (teach →
+  follow-ups → comprehension), is recorded to the learning memory, and then
+  fresh nudges follow from the new lesson — the exclusion set growing each round
+  so covered threads are never re-suggested. `ExploreResult.level` now reports
+  the level in effect at the very end (a nudge lesson can re-pitch it).
+
+**Two input fixes folded in as polish**, both surfaced by a live run where an
+"orb" query pulled `js/player.js` and an accepted offer silently dead-ended:
+
+- **Wider accept set.** `_prompt_decision` accepted only `""`/`y`/`yes`, so a
+  natural "yeah"/"sure"/"ok" fell through to the decline→redirect path with no
+  hint why. It now matches a `_AFFIRMATIVES` set of common affirmatives
+  (case-insensitive, whitespace-stripped); Enter still takes the default, clear
+  negatives still route to the redirect.
+- **Weak-match heads-up.** Retrieval always returns top-k no matter how weak the
+  match. When *every* hit is above `WEAK_MATCH_DISTANCE = 0.6` (strong hits sit
+  ~0.3), `_weak_match_note` now says plainly that nothing closely matches the
+  wording and names the closest file as a best guess, instead of passing off
+  loosely related code as a real answer. Routed through a shared `_show_hits`
+  wrapper so it fires wherever the learner types a query (initial, redirect, and
+  nudge-chosen). One strong hit suppresses the note.
+
+Verified live against Swerve end to end: the `"how do the orbs work"` query
+(Swerve has no orbs — the system is `js/collectibles.js`) now shows the
+weak-match warning naming `js/player.js`; `yeah` opens the lesson; and the nudge
+loop ran two nudges in a row, each teaching a real lesson, with the second round
+correctly omitting already-covered threads. An offline harness (model + retrieval
+stubbed) also covers the accept set, the weak-match note, and the full
+accept → nudge → second-lesson → record path.
+
+**Phase 2 is complete** — all five steps (show-then-offer, Socratic teaching,
+learner calibration, learning memory, and now "what's next" nudges) are built
+and verified.
+
 ## 2026-06-09 — Fix: long lessons no longer truncate mid-sentence
 
 A live lesson got cut off mid-sentence (stopped at "Are you lined up with the—")

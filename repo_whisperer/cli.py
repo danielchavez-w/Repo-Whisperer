@@ -8,10 +8,11 @@ Ties the engine together into the commands the learner uses:
 
 `ingest` walks → chunks → embeds → stores a repo (rebuilding the collection);
 `ask` retrieves the most relevant chunks and prints a grounded, cited answer
-(Phase 1). `explore` is the first Phase 2 tutoring beat: it shows the relevant
-code, then offers a specific invitation to be taught how it works. All default
-to the `chroma_db/` store, so a typical session is one `ingest` followed by as
-many `ask`s and `explore`s as you like.
+(Phase 1). `explore` is the Phase 2 tutoring loop: it shows the relevant code,
+offers to teach it, teaches at the learner's level, and afterwards suggests
+related unexplored threads to keep the session going. All default to the
+`chroma_db/` store, so a typical session is one `ingest` followed by as many
+`ask`s and `explore`s as you like.
 """
 
 from __future__ import annotations
@@ -132,9 +133,10 @@ def main(argv: list[str] | None = None) -> int:
     p_explore = sub.add_parser(
         "explore", help="show relevant code, then offer to teach how it works",
         description=(
-            "Phase 2 tutoring beat: retrieve and show the most relevant code "
-            "for a 'where is X' query, then offer a specific invitation to be "
-            "taught how it works (accept or decline)."
+            "Phase 2 tutoring loop: retrieve and show the most relevant code "
+            "for a 'where is X' query, offer to teach it, teach at your level "
+            "with follow-ups, then suggest related unexplored threads to "
+            "wander into next (you always decide)."
         ),
     )
     p_explore.add_argument("query", help="what you want to see, in quotes")
