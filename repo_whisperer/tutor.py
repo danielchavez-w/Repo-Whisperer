@@ -5,11 +5,13 @@ The flow:
 1. **Show me.** The learner asks where something is. We reuse Phase 1 retrieval
    (`answer.retrieve`) to pull the most relevant chunks and SHOW them — the
    actual code, with `path:start-end` citations.
-2. **Offer the doorway.** Having seen the code, the learner may get curious about
-   how it works. So we generate ONE specific, tempting invitation to be taught —
-   derived from the actual retrieved code, naming a real function/concept (e.g.
-   "Want me to walk you through how `initRails` builds the two rail meshes?").
-   The learner accepts or declines; we capture the choice.
+2. **Offer the doorway.** Having seen the code, the learner is asked if they want
+   to learn it. By default this is a plain invitation ("Want to learn this?") that
+   teaches the thread they searched for. ONLY when the learning memory holds a
+   genuine connection to a past lesson do we make a SPECIFIC offer that names the
+   tie (e.g. "Want to see how this ties into your earlier lesson on `initRails`?").
+   The learner accepts or declines. On a decline we don't dead-end — we ask what
+   they'd rather learn and teach that instead.
 3. **Teach it — at the learner's altitude.** If the learner accepts, we teach
    that thread (`teach_thread`), pitched at their chosen `level`
    (beginner/intermediate/advanced). The SAME grounded, cited content is
@@ -17,9 +19,11 @@ The flow:
    defined in plain English the first time it appears. Then the learner can ask
    in-lesson follow-ups (and re-pitch the level on the fly), and finally take an
    optional, light comprehension invitation.
+4. **Remember it across sessions.** State (the chosen level + covered threads)
+   persists via `learning`. The level carries over between runs, and each new
+   lesson is handed a brief of earlier threads so it can cross-reference them.
 
-Still to come: learning memory across threads (Step 4) and "what's next" nudges
-(Step 5).
+Still to come: "what's next" nudges (Step 5).
 
 Run standalone:
 
@@ -32,6 +36,7 @@ import argparse
 import sys
 from dataclasses import dataclass
 
+from repo_whisperer import learning
 from repo_whisperer.answer import (
     ANSWER_MODEL,
     DEFAULT_TOP_K,
@@ -40,6 +45,7 @@ from repo_whisperer.answer import (
     build_context,
     retrieve,
 )
+from repo_whisperer.learning import DEFAULT_STATE_PATH
 
 # The teaching offer is short by design — a single tempting sentence.
 MAX_OFFER_TOKENS: int = 200
@@ -128,6 +134,27 @@ OFFER_SYSTEM_PROMPT = (
     "to walk you through how `initRails` builds the two rail meshes?\"\n"
     "- Do NOT teach or explain anything yet. Just make the offer. No preamble, "
     "no lists, no code blocks."
+)
+
+# Returned by the connection-offer prompt when there's no genuine tie to a past
+# lesson, signalling the caller to fall back to the plain invitation.
+NO_CONNECTION_SENTINEL: str = "NONE"
+
+CONNECTION_OFFER_SYSTEM_PROMPT = (
+    "You are a patient expert coding tutor sitting beside a learner exploring one "
+    "codebase. They just asked to see some code and have been shown it. You are "
+    "also given a brief of threads you've ALREADY taught them in this repo. Your "
+    "job is to decide whether this new code genuinely connects to one of those "
+    "past lessons, and if so, offer to teach it through that connection.\n\n"
+    "Rules:\n"
+    f"- If there is NO real, substantive connection, respond with exactly "
+    f"{NO_CONNECTION_SENTINEL} and nothing else. Do NOT manufacture a tie.\n"
+    "- A real connection means a shared mechanism, pattern, data flow, or "
+    "dependency — not merely 'both are code' or 'both are in this repo'.\n"
+    "- When there IS one, respond with a SINGLE inviting sentence that names the "
+    "past topic and the tie, e.g. \"Want to see how this reuses the same buffer "
+    "setup you saw in `initRails`?\" Name real identifiers from the excerpts.\n"
+    "- No preamble, no lists, no code blocks — just the sentence or the sentinel."
 )
 
 TEACH_SYSTEM_PROMPT = (
@@ -219,14 +246,37 @@ def _ask_model(system: str, user: str, max_tokens: int, model: str) -> str:
     ).strip()
 
 
-def generate_offer(query: str, hits: list[Hit], model: str = OFFER_MODEL) -> str:
-    """Ask the model for one specific teaching invitation grounded in `hits`.
+def generate_offer(
+    query: str, hits: list[Hit], prior: str = "", model: str = OFFER_MODEL
+) -> str:
+    """Ask the model for a specific teaching invitation grounded in `hits`.
 
-    The offer names a real identifier from the retrieved code so it tempts the
-    learner toward a concrete mechanism rather than a generic "want to learn
-    more?". Raises ValueError (via `_client`) if the API key is missing.
+    With no `prior`, the offer names a real identifier from the retrieved code so
+    it tempts the learner toward a concrete mechanism rather than a generic "want
+    to learn more?".
+
+    When `prior` (a brief of past lessons) is given, the offer is made ONLY if the
+    new code genuinely connects to one of those lessons — phrased to name the tie
+    (e.g. "Want to see how this ties into your earlier lesson on `X`?"). If there
+    is no real connection the model returns the sentinel and we return "" so the
+    caller can fall back to a plain invitation.
+
+    Raises ValueError (via `_client`) if the API key is missing.
     """
     context = build_context(hits)
+    if prior:
+        user_message = (
+            f'The learner asked: "{query}"\n\n'
+            f"These are the code excerpts they were just shown:\n\n{context}\n\n"
+            f"Threads you've already taught them in this repo:\n{prior}\n\n"
+            f"If this new code genuinely connects to one of those past lessons, "
+            f"offer to teach it through that tie; otherwise reply with exactly "
+            f"{NO_CONNECTION_SENTINEL}."
+        )
+        offer = _ask_model(
+            CONNECTION_OFFER_SYSTEM_PROMPT, user_message, MAX_OFFER_TOKENS, model
+        )
+        return "" if offer.strip().upper().startswith(NO_CONNECTION_SENTINEL) else offer
     user_message = (
         f'The learner asked: "{query}"\n\n'
         f"These are the code excerpts they were just shown:\n\n{context}\n\n"
@@ -235,29 +285,53 @@ def generate_offer(query: str, hits: list[Hit], model: str = OFFER_MODEL) -> str
     return _ask_model(OFFER_SYSTEM_PROMPT, user_message, MAX_OFFER_TOKENS, model)
 
 
+def _prior_note(prior: str) -> str:
+    """Build the optional 'previously covered' instruction for the teaching prompt.
+
+    Returns "" when there's nothing prior, so a first lesson reads exactly as it
+    did before this step. The note invites cross-referencing but only when it
+    genuinely aids understanding — never a forced callback.
+    """
+    if not prior:
+        return ""
+    return (
+        f"\n\nThe learner has already been taught these threads in this repo:\n"
+        f"{prior}\n"
+        f"If — and only if — it genuinely helps understanding, briefly connect "
+        f"this lesson to one of them (e.g. \"this uses the same pattern you saw in "
+        f"X earlier\"). Never force a connection or list them; skip it when there "
+        f"isn't a real link."
+    )
+
+
 def teach_thread(
     query: str,
     hits: list[Hit],
-    offer: str,
+    offer: str = "",
     level: str = DEFAULT_LEVEL,
+    prior: str = "",
     model: str = TEACH_MODEL,
 ) -> str:
     """Teach the accepted thread, grounded in `hits`, cited, and pitched at `level`.
 
     Explains how the retrieved code works in a teaching voice, building
-    understanding step by step and citing `path:start-end` keys. `offer` keeps
-    the lesson on the specific thread the learner accepted; `level` controls only
-    the assumed vocabulary, not the facts. Raises ValueError on an unknown level
-    or a missing API key.
+    understanding step by step and citing `path:start-end` keys. The lesson stays
+    on the thread the learner searched for (`query`); `offer`, when non-empty,
+    carries a connection to a past lesson the lesson can lean into. `level`
+    controls only the assumed vocabulary, not the facts. `prior` is an optional
+    brief of threads already covered, so the lesson can cross-reference them.
+    Raises ValueError on an unknown level or a missing API key.
     """
     _check_level(level)
     context = build_context(hits)
+    offer_line = f"They accepted this teaching offer:\n{offer}\n\n" if offer else ""
     user_message = (
         f'The learner originally asked: "{query}"\n\n'
-        f"They accepted this teaching offer:\n{offer}\n\n"
+        f"{offer_line}"
         f"These are the code excerpts they were shown:\n\n{context}\n\n"
         f"Now teach this thread: walk them through how it works, grounded in "
         f"these excerpts and citing the `path:start-end` keys as you go."
+        f"{_prior_note(prior)}"
     )
     system = f"{TEACH_SYSTEM_PROMPT}\n\n{_level_block(level)}"
     return _ask_model(system, user_message, MAX_TEACH_TOKENS, model)
@@ -339,15 +413,33 @@ def format_hits(query: str, hits: list[Hit]) -> str:
 
 
 def _prompt_decision(offer: str, input_fn=input) -> bool:
-    """Show the offer and capture the learner's accept/decline. Returns accepted."""
+    """Ask whether to learn the thread, defaulting to yes. Returns accepted.
+
+    When `offer` is non-empty (a genuine connection to a past lesson) it's shown
+    as the invitation; otherwise the prompt is the plain "Want to learn this?".
+    """
     print("\n" + "=" * 60)
-    print(f"💡 {offer}")
+    if offer:
+        print(f"💡 {offer}")
+        prompt = "\nLearn this? [Y/n] "
+    else:
+        prompt = "Want to learn this? [Y/n] "
     try:
-        reply = input_fn("\nLearn this? [y/N] ").strip().lower()
+        reply = input_fn(prompt).strip().lower()
     except EOFError:
-        # No interactive input available — treat as "not now", don't crash.
-        reply = ""
-    return reply in {"y", "yes"}
+        # No interactive input available — don't barrel into a lesson uninvited.
+        return False
+    return reply in {"", "y", "yes"}
+
+
+def _prompt_redirect(input_fn=input) -> str:
+    """On a decline, ask what the learner would rather learn. Returns the new
+    topic, or "" to stop — so declining never dead-ends."""
+    print("\nNo problem — what would you like to learn instead?")
+    try:
+        return input_fn("(type a topic, or press Enter to stop) > ").strip()
+    except EOFError:
+        return ""
 
 
 def _run_followups(
@@ -356,12 +448,15 @@ def _run_followups(
     offer: str,
     teaching: str,
     level: str,
+    prior: str,
     model: str,
     input_fn,
-) -> tuple[str, str]:
+) -> tuple[str, str, bool]:
     """Let the learner ask follow-ups and re-pitch the level until they're done.
 
-    Returns the (possibly re-taught) lesson text and the level in effect at exit.
+    Returns the (possibly re-taught) lesson text, the level in effect at exit, and
+    whether the learner actually asked at least one follow-up (an engagement
+    signal for the learning memory; re-pitching the level alone doesn't count).
     Typing `level <tier>` re-teaches the same thread at a new altitude; a blank
     line or 'done' exits.
     """
@@ -371,6 +466,7 @@ def _run_followups(
     print(f"type 'level {'|'.join(LEVELS)}' to re-pitch it,")
     print("or press Enter / type 'done' to move on.")
 
+    asked = False
     while True:
         try:
             line = input_fn("\n> ").strip()
@@ -390,13 +486,16 @@ def _run_followups(
                 level = new_level
                 print(f"\nRe-teaching at the '{level}' level.")
                 print("-" * 60)
-                teaching = teach_thread(query, hits, offer, level=level, model=model)
+                teaching = teach_thread(
+                    query, hits, offer, level=level, prior=prior, model=model
+                )
                 print(teaching)
             continue
 
+        asked = True
         print("\n" + answer_followup(line, hits, teaching, level=level, model=model))
 
-    return teaching, level
+    return teaching, level, asked
 
 
 def _run_comprehension(
@@ -406,8 +505,12 @@ def _run_comprehension(
     level: str,
     model: str,
     input_fn,
-) -> None:
-    """Offer an optional comprehension engagement and discuss the attempt."""
+) -> bool:
+    """Offer an optional comprehension engagement and discuss the attempt.
+
+    Returns whether the learner actually attempted it (an engagement signal for
+    the learning memory); declining or skipping returns False.
+    """
     print("\n" + "=" * 60)
     try:
         reply = input_fn("Want a quick way to make this stick? [y/N] ").strip().lower()
@@ -415,7 +518,7 @@ def _run_comprehension(
         reply = ""
     if reply not in {"y", "yes"}:
         print("\nNo worries — keep exploring.")
-        return
+        return False
 
     challenge = comprehension_challenge(query, hits, lesson, level=level, model=model)
     print("\n" + challenge)
@@ -425,12 +528,39 @@ def _run_comprehension(
         response = ""
     if not response:
         print("\nAll good — no pressure.")
-        return
+        return False
 
     print(
         "\n"
         + evaluate_response(challenge, response, hits, lesson, level=level, model=model)
     )
+    return True
+
+
+def _deliver_lesson(
+    query: str,
+    hits: list[Hit],
+    offer: str,
+    level: str,
+    prior: str,
+    model: str,
+    input_fn,
+) -> tuple[str, str, bool]:
+    """Teach `query` (grounded in `hits`), then run follow-ups and comprehension.
+
+    Shared by the accept path and the on-decline redirect path. Returns the final
+    lesson text, the level in effect at exit, and whether the learner engaged.
+    """
+    print(f"\nGreat — let's walk through it (at the '{level}' level).")
+    print("-" * 60)
+    teaching = teach_thread(query, hits, offer, level=level, prior=prior, model=model)
+    print(teaching)
+
+    teaching, level, asked = _run_followups(
+        query, hits, offer, teaching, level, prior, model, input_fn,
+    )
+    attempted = _run_comprehension(query, hits, teaching, level, model, input_fn)
+    return teaching, level, asked or attempted
 
 
 def explore(
@@ -438,48 +568,77 @@ def explore(
     k: int = DEFAULT_TOP_K,
     db_dir: str = "chroma_db",
     model: str = OFFER_MODEL,
-    level: str = DEFAULT_LEVEL,
+    level: str | None = None,
     decide: bool = True,
     input_fn=input,
+    state_path: str | None = DEFAULT_STATE_PATH,
 ) -> ExploreResult:
-    """Run the show → offer → teach beat for `query`, calibrated to `level`.
+    """Run the show → offer → teach beat for `query`, calibrated and remembered.
 
-    Retrieves and prints the relevant chunks, generates and prints a specific
-    teaching offer, and (when `decide`) captures the learner's accept/decline. On
-    accept it teaches the thread at `level`, runs an in-lesson follow-up loop
-    (where the level can be re-pitched), and offers an optional comprehension
-    invitation. Returns an `ExploreResult`.
+    Loads learning state from `state_path` (set None to disable persistence) and
+    resolves the level as: explicit `level` → the saved level → `beginner`.
+    Retrieves and prints the relevant chunks, then asks whether to learn the
+    thread. The invitation is plain by default; it becomes a specific offer only
+    when the learning memory holds a genuine connection to a past lesson. On
+    accept it teaches the thread the learner searched for; on decline it asks what
+    they'd rather learn and teaches that instead (never a dead end). The lesson is
+    handed a brief of previously covered threads for cross-references, runs the
+    in-lesson follow-up loop, and offers an optional comprehension invitation. The
+    covered thread and final level are then saved. Returns an `ExploreResult`.
     """
+    state = learning.load_state(state_path)
+    level = level or state.level or DEFAULT_LEVEL
     _check_level(level)
+
+    if state.threads:
+        print(
+            f"↩  Resuming — {len(state.threads)} thread(s) explored so far, "
+            f"learning at the '{level}' level."
+        )
+
     hits = retrieve(query, k=k, db_dir=db_dir)
     print(format_hits(query, hits))
 
-    offer = generate_offer(query, hits, model=model)
+    # A specific offer is made ONLY when memory yields a genuine connection;
+    # otherwise the prompt is plain and we skip the offer call entirely.
+    prior = state.prior_brief(exclude_citations=[h.id for h in hits])
+    offer = generate_offer(query, hits, prior=prior, model=model) if prior else ""
 
     if not decide:
         print("\n" + "=" * 60)
-        print(f"💡 {offer}")
+        print(f"💡 {offer}" if offer else "Want to learn this? [Y/n]")
         return ExploreResult(
             query=query, hits=hits, offer=offer, accepted=None, level=level,
         )
 
-    accepted = _prompt_decision(offer, input_fn=input_fn)
-    if not accepted:
-        print("\nNo problem — keep exploring.")
-        print("Run `explore` again with whatever catches your eye.")
-        return ExploreResult(
-            query=query, hits=hits, offer=offer, accepted=False, level=level,
-        )
+    if not _prompt_decision(offer, input_fn=input_fn):
+        redirect = _prompt_redirect(input_fn=input_fn)
+        if not redirect:
+            print("\nNo problem — keep exploring.")
+            print("Run `explore` again with whatever catches your eye.")
+            return ExploreResult(
+                query=query, hits=hits, offer=offer, accepted=False, level=level,
+            )
+        # Teach what they'd rather learn instead, grounded in its own code.
+        query = redirect
+        hits = retrieve(query, k=k, db_dir=db_dir)
+        print(format_hits(query, hits))
+        offer = ""
+        prior = state.prior_brief(exclude_citations=[h.id for h in hits])
 
-    print(f"\nGreat — let's walk through it (at the '{level}' level).")
-    print("-" * 60)
-    teaching = teach_thread(query, hits, offer, level=level, model=model)
-    print(teaching)
-
-    teaching, level = _run_followups(
-        query, hits, offer, teaching, level, model, input_fn,
+    teaching, level, engaged = _deliver_lesson(
+        query, hits, offer, level, prior, model, input_fn,
     )
-    _run_comprehension(query, hits, teaching, level, model, input_fn)
+
+    state.record_thread(
+        query=query,
+        offer=offer,
+        citations=[h.id for h in hits],
+        level=level,
+        engaged=engaged,
+    )
+    state.level = level
+    learning.save_state(state, state_path)
 
     return ExploreResult(
         query=query,
@@ -506,8 +665,12 @@ def _main(argv: list[str]) -> int:
         help=f"number of chunks to retrieve (default: {DEFAULT_TOP_K})",
     )
     parser.add_argument(
-        "--level", choices=LEVELS, default=DEFAULT_LEVEL,
-        help=f"teaching altitude (default: {DEFAULT_LEVEL})",
+        "--level", choices=LEVELS, default=None,
+        help=f"teaching altitude (default: your saved level, else {DEFAULT_LEVEL})",
+    )
+    parser.add_argument(
+        "--state", default=DEFAULT_STATE_PATH, metavar="FILE",
+        help=f"learning-state file (default: {DEFAULT_STATE_PATH})",
     )
     args = parser.parse_args(argv[1:])
 
@@ -516,7 +679,10 @@ def _main(argv: list[str]) -> int:
         return 1
 
     try:
-        explore(args.query, k=args.top_k, db_dir=args.db, level=args.level)
+        explore(
+            args.query, k=args.top_k, db_dir=args.db,
+            level=args.level, state_path=args.state,
+        )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

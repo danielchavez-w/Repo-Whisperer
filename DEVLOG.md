@@ -1,5 +1,49 @@
 # Development Log
 
+## 2026-06-08 — Phase 2, Step 4: learning memory + explore-flow refinements
+
+Step 4 gives the tutor a memory across sessions, plus a round of UX fixes to the
+`explore` flow that testing surfaced.
+
+**Learning memory (`repo_whisperer/learning.py`, new).** A single JSON sidecar
+(`learning_state.json`, gitignored) keyed to the last-ingested repo, holding the
+learner's chosen level and the threads they've covered. Plain dataclasses + `json`
+(no SQLite), atomic writes, and a forgiving loader — a missing or corrupt file
+starts fresh rather than crashing a lesson. `ingest` binds the state to the repo
+and clears stale threads on a repo switch while keeping the level; `explore`
+resolves the level as explicit `--level` → saved level → `beginner`, hands each
+lesson a brief of past threads for cross-references, and records the covered
+thread + final level on the way out. A thread's topic now comes from the
+learner's query (not the offer — see below).
+
+**Explore-flow refinements (`tutor.py`, `cli.py`), from a corrected, smaller
+scope:**
+
+- **Post-ingest guidance.** "Ready." now shows BOTH paths — `explore` (learn step
+  by step) and `ask` (quick question) — instead of advertising only `ask`, which
+  had been steering learners away from the tutoring loop.
+- **Plain by default, specific only when memory earns it.** After showing the
+  code, the invitation is a plain "Want to learn this? [Y/n]" (default yes) that
+  teaches the thread the learner searched for. The auto-picked suggested lesson is
+  KEPT (`generate_offer` retained, now memory-aware) but only fires as a SPECIFIC
+  offer when the learning memory holds a genuine connection to a past lesson
+  (e.g. "Want to see how this ties into your earlier lesson on `initRails`?"); the
+  model returns a `NONE` sentinel when there's no real tie, and we fall back to
+  the plain prompt. First/unconnected lessons skip the offer call entirely (one
+  fewer round-trip).
+- **Decline is no longer a dead end.** On `n`, the tutor asks what the learner
+  would rather learn and teaches THAT instead — re-retrieving so the new lesson is
+  grounded in its own code — then runs the same follow-up/comprehension/record
+  flow. A blank reply exits gracefully. The teach→follow-ups→comprehension steps
+  were factored into `_deliver_lesson`, shared by the accept and redirect paths.
+
+**Verified live against Swerve:** empty memory → plain prompt → taught the
+searched thread at beginner level, staying honestly grounded on a follow-up; state
+persisted with a query-derived topic; a second run resumed, the real model
+produced a genuine connection offer tying a track-segments query back to the
+rails lesson, and declining redirected into a fresh grounded lesson that was
+recorded. Step 5 ("what's next" nudges) is next.
+
 ## 2026-06-07 — Phase 2, Step 3: learner calibration (altitude, follow-ups, comprehension)
 
 The task spec was revised (`PHASE_2_TASK_MODIFIED.md`) around one insight from

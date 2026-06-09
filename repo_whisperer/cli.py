@@ -19,7 +19,9 @@ from __future__ import annotations
 import argparse
 import sys
 
+from repo_whisperer import learning
 from repo_whisperer.answer import DEFAULT_TOP_K, answer_question
+from repo_whisperer.learning import DEFAULT_STATE_PATH
 from repo_whisperer.store import (
     COLLECTION_NAME,
     DEFAULT_DB_DIR,
@@ -27,7 +29,7 @@ from repo_whisperer.store import (
     DEFAULT_WINDOW,
     ingest_repo,
 )
-from repo_whisperer.tutor import DEFAULT_LEVEL, LEVELS, explore
+from repo_whisperer.tutor import LEVELS, explore
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
@@ -40,7 +42,17 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         f"(from {result.num_chunks} chunked across {result.num_files} files) "
         f"in collection '{COLLECTION_NAME}' at {result.db_dir}."
     )
-    print(f'Ready. Ask a question with:  python -m repo_whisperer ask "<question>"')
+
+    # Tie the learning memory to this repo. Switching to a different repo clears
+    # stale covered threads (their citations no longer exist) but keeps the level.
+    before = len(learning.load_state(args.state).threads)
+    state = learning.note_repo_ingested(args.path, path=args.state)
+    if before and not state.threads:
+        print("Note: this is a different repo, so prior learning history was cleared.")
+
+    print("Ready. Two ways to dig in:")
+    print('  Learn it step by step:   python -m repo_whisperer explore "<topic>"')
+    print('  Ask a quick question:    python -m repo_whisperer ask "<question>"')
     return 0
 
 
@@ -63,7 +75,10 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         print("error: query is empty", file=sys.stderr)
         return 1
 
-    explore(args.query, k=args.top_k, db_dir=args.db, level=args.level)
+    explore(
+        args.query, k=args.top_k, db_dir=args.db,
+        level=args.level, state_path=args.state,
+    )
     return 0
 
 
@@ -92,6 +107,10 @@ def main(argv: list[str] | None = None) -> int:
     p_ingest.add_argument(
         "--overlap", type=int, default=DEFAULT_OVERLAP,
         help=f"overlap between adjacent chunks in lines (default: {DEFAULT_OVERLAP})",
+    )
+    p_ingest.add_argument(
+        "--state", default=DEFAULT_STATE_PATH, metavar="FILE",
+        help=f"learning-state file to bind to this repo (default: {DEFAULT_STATE_PATH})",
     )
     p_ingest.set_defaults(func=_cmd_ingest)
 
@@ -128,8 +147,13 @@ def main(argv: list[str] | None = None) -> int:
         help=f"number of chunks to retrieve (default: {DEFAULT_TOP_K})",
     )
     p_explore.add_argument(
-        "--level", choices=LEVELS, default=DEFAULT_LEVEL,
-        help=f"teaching altitude — how much jargon to assume (default: {DEFAULT_LEVEL})",
+        "--level", choices=LEVELS, default=None,
+        help="teaching altitude — how much jargon to assume "
+             "(default: your saved level, else beginner)",
+    )
+    p_explore.add_argument(
+        "--state", default=DEFAULT_STATE_PATH, metavar="FILE",
+        help=f"learning-state file (default: {DEFAULT_STATE_PATH})",
     )
     p_explore.set_defaults(func=_cmd_explore)
 

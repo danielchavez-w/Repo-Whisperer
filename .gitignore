@@ -15,6 +15,9 @@ env/
 # Vector database (local, regenerable — never commit)
 chroma_db/
 
+# Learning memory (per-user runtime state — regenerable, not source)
+learning_state.json
+
 # Editor / OS cruft
 .DS_Store
 .idea/
