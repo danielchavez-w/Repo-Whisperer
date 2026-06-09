@@ -5,8 +5,8 @@ through it, watches you work, and verifies your progress in real time.
 
 It is built in three phases:
 
-- **Phase 1 (current):** Text-only RAG Q&A over a local codebase.
-- **Phase 2 (later):** Tutoring loop — lesson planning, Socratic explanation,
+- **Phase 1 (DONE):** Text-only RAG Q&A over a local codebase.
+- **Phase 2 (current):** Tutoring loop — lesson planning, Socratic explanation,
   comprehension checkpoints.
 - **Phase 3 (later):** Screen-aware verification using the vision API.
 
