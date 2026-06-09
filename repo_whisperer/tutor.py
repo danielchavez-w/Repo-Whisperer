@@ -50,9 +50,13 @@ from repo_whisperer.learning import DEFAULT_STATE_PATH
 # The teaching offer is short by design — a single tempting sentence.
 MAX_OFFER_TOKENS: int = 200
 
-# A taught thread is a few focused paragraphs — longer than an offer or a flat
-# answer, but still bounded; we're explaining one thread, not the whole repo.
-MAX_TEACH_TOKENS: int = 1536
+# A taught thread is a few focused paragraphs. Generous headroom so a long lesson
+# finishes its thought rather than getting cut off mid-sentence at the ceiling.
+MAX_TEACH_TOKENS: int = 4096
+
+# Safety net for the rare lesson that still overruns MAX_TEACH_TOKENS: how many
+# follow-up "keep going" calls _ask_model may make to finish a truncated reply.
+MAX_TEACH_CONTINUATIONS: int = 2
 
 # Follow-ups, challenges, and evaluations are shorter, focused replies.
 MAX_FOLLOWUP_TOKENS: int = 800
@@ -232,18 +236,51 @@ class ExploreResult:
     level: str = DEFAULT_LEVEL
 
 
-def _ask_model(system: str, user: str, max_tokens: int, model: str) -> str:
-    """Single-turn Anthropic call returning the concatenated text blocks."""
+# Sent as a fresh user turn to finish a reply that was cut off at the token
+# ceiling. The model doesn't support assistant prefill, so we keep the partial in
+# the history and ask it to pick up where it stopped without repeating itself.
+_CONTINUE_INSTRUCTION = (
+    "Your previous message was cut off because it hit the length limit. Continue "
+    "from exactly where you stopped — pick up mid-sentence or mid-word if that is "
+    "where it ended. Do not repeat anything you already wrote and do not add any "
+    "preamble; just continue the text."
+)
+
+
+def _ask_model(
+    system: str,
+    user: str,
+    max_tokens: int,
+    model: str,
+    max_continuations: int = 0,
+) -> str:
+    """Anthropic call returning the concatenated text blocks.
+
+    When `max_continuations > 0` and a reply is truncated because it hit the token
+    ceiling (`stop_reason == "max_tokens"`), this makes up to that many follow-up
+    calls to finish it — keeping the partial reply in the conversation and asking
+    the model to pick up where it left off — instead of returning a sentence cut
+    off mid-word. Left at 0 (the default), it's a single bounded call.
+    """
     client = _client()
-    response = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    return "".join(
-        block.text for block in response.content if block.type == "text"
-    ).strip()
+    messages = [{"role": "user", "content": user}]
+    accumulated = ""
+    for _ in range(max_continuations + 1):
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=messages,
+        )
+        chunk = "".join(
+            block.text for block in response.content if block.type == "text"
+        )
+        accumulated += chunk
+        if response.stop_reason != "max_tokens" or not chunk:
+            break
+        messages.append({"role": "assistant", "content": chunk})
+        messages.append({"role": "user", "content": _CONTINUE_INSTRUCTION})
+    return accumulated.strip()
 
 
 def generate_offer(
@@ -334,7 +371,10 @@ def teach_thread(
         f"{_prior_note(prior)}"
     )
     system = f"{TEACH_SYSTEM_PROMPT}\n\n{_level_block(level)}"
-    return _ask_model(system, user_message, MAX_TEACH_TOKENS, model)
+    return _ask_model(
+        system, user_message, MAX_TEACH_TOKENS, model,
+        max_continuations=MAX_TEACH_CONTINUATIONS,
+    )
 
 
 def answer_followup(

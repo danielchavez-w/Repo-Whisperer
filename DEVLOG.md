@@ -1,5 +1,28 @@
 # Development Log
 
+## 2026-06-09 — Fix: long lessons no longer truncate mid-sentence
+
+A live lesson got cut off mid-sentence (stopped at "Are you lined up with the—")
+and dropped back to the shell: the teaching call was hitting its `max_tokens`
+ceiling on a long lesson and truncating. Two fixes in `tutor.py`:
+
+- **More room.** `MAX_TEACH_TOKENS` raised 1536 → 4096 so a typical long lesson
+  finishes its thought in a single call.
+- **A safety net for the rare overrun.** `_ask_model` gained an opt-in
+  `max_continuations` parameter: when a reply stops with `stop_reason ==
+  "max_tokens"`, it makes up to that many follow-up calls to finish, keeping the
+  partial reply in the conversation and asking the model to continue from where it
+  left off without repeating. `teach_thread` uses it (`MAX_TEACH_CONTINUATIONS =
+  2`); the intentionally short calls (offers, challenges) stay bounded at the
+  default of 0. Note: this model rejects assistant-message prefill ("the
+  conversation must end with a user message"), so the continuation is driven by a
+  fresh user "keep going" turn rather than prefilling the assistant reply.
+
+Verified against Swerve: the collision/hoop lesson that previously truncated at
+1536 (`stop_reason == max_tokens`, ending "…So the game dec") now completes
+cleanly under the new path, ending on a full summary sentence; a forced 250-token
+ceiling confirmed the continuation stitches multiple chunks together.
+
 ## 2026-06-08 — Phase 2, Step 4: learning memory + explore-flow refinements
 
 Step 4 gives the tutor a memory across sessions, plus a round of UX fixes to the
