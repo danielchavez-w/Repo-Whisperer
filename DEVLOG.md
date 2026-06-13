@@ -1,5 +1,46 @@
 # Development Log
 
+## 2026-06-13 — Design thread (carried forward): a "practice space"
+
+Captured mid-Phase-3, not scoped — recording the idea so it isn't lost. Right
+now the tutor and learner go back and forth in plain English about code chunks
+(explain, ask, refresh), which works well. The idea is to add a place where the
+learner can *do* something with what they just learned, not only talk about it.
+Strictly opt-in — offered, never pushed, the same pull principle as everything
+else.
+
+**Two distinct flavors — keep them separate; they are not the same feature:**
+
+1. **Check my work** — the learner goes off, edits or writes real code based on a
+   lesson, then asks the tutor to verify it. This is already scoped as Phase 3's
+   `check` command (application verification: screen-for-intent / disk-for-truth →
+   judge correctness against the taught thread).
+2. **Give me practice** — the tutor *generates* a small exercise in a separate
+   sandbox that didn't exist before, so the learner can apply the concept without
+   needing a real task in the repo. This is the new, unscoped idea. It's the
+   sibling of `check`: one *verifies* practice the learner brought, the other
+   *offers* practice the tutor created.
+
+**Why they pair:** both lean on the same honest-judge primitive (evidence + rubric
+→ verdict). A generated exercise is just another thing the judge can later assess,
+so "offer practice" and "check practice" could share a spine the way
+relevance-judging and verification already do.
+
+**Open questions for when this gets picked up:**
+
+- Where does the sandbox live? A separate file / scratch space vs. an in-terminal
+  prompt-and-respond drill.
+- Does the tutor generate the exercise from the taught thread *plus the actual
+  repo code*, so practice is grounded in this codebase rather than generic
+  textbook problems?
+- Does a completed/checked exercise feed `learning_state.json` as a stronger
+  signal than "was taught" — i.e. "has practiced" (overlaps with the planned
+  mastery field)?
+- Ship alongside `check`, or as its own thing after verification lands?
+
+**Status:** captured idea, not scoped. Decide its shape after Phase 3's core
+verification (Steps 2–5) is built.
+
 ## 2026-06-13 — Phase 3, Step 1: the honest-judge primitive (model-judged relevance)
 
 Starting Phase 3 (screen-aware verification). Design was settled in a session up
