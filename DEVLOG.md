@@ -1,5 +1,67 @@
 # Development Log
 
+## 2026-06-13 — Phase 3, Step 1: the honest-judge primitive (model-judged relevance)
+
+Starting Phase 3 (screen-aware verification). Design was settled in a session up
+front: verify both comprehension (A) and application (B), staged in one phase,
+sharing one judge; on-demand announced snapshots (active-window, whole-screen
+fallback, capturing the last *non-tutor* window so an alt-tab to the tutor
+doesn't grab the wrong thing); application verification lives in a new top-level
+`check` command that defaults to the most-recently-taught thread. And: build the
+honest-judge primitive **text-first** and verify it standalone before any vision
+work — that's this step.
+
+**New module `repo_whisperer/judge.py`.** An evidence-agnostic judge that returns
+a fixed `Verdict` schema, deliberately stable so Phase 3 verification can reuse it
+unchanged with image evidence instead of text:
+
+```
+verdict:          answers | partial | doesnt_answer | cant_tell
+confidence:       high | medium | low
+reason:           1-2 sentences grounded in the evidence
+missing:          what would move it up a tier, or null if "answers"
+evidence_quality: sufficient | thin | unreadable
+```
+
+- `Verdict` dataclass (+ `answered` convenience) and the allowed-value tuples.
+- `VERDICT_SCHEMA_NOTE` — the JSON contract defined in ONE place, so the future
+  verification rubric reuses the identical schema rather than drifting.
+- `_parse_verdict` — forgiving: strips markdown fences, extracts the outermost
+  `{...}`, coerces out-of-range field values to safe defaults, and degrades a
+  totally unparseable reply to an honest `cant_tell` rather than raising. The
+  judge failing must never take down the lesson around it (same philosophy as
+  `learning.py`'s loader).
+- `_run_judge(system, content, model)` — the core call, kept evidence-agnostic:
+  `content` is a plain string today but can be a content list with an image block
+  later, with no change to the schema or parsing.
+- `judge_relevance(question, hits)` — this step's concrete use. Empty hits
+  short-circuit to a confident `doesnt_answer` with no API spend.
+- A standalone runner: `python -m repo_whisperer.judge "<question>"` retrieves and
+  prints the verdict over the current store — so Step 1 is verifiable on its own,
+  before any capture code exists.
+
+**Why a model and not a threshold.** This is the intended replacement logged when
+the old `WEAK_MATCH_DISTANCE` heads-up was removed: retrieval always returns its
+top-k, and the closest-hit distance for a genuinely-absent feature (~0.68) and a
+real feature worded differently (~0.65) sit in the same ~0.025 band, so one cosine
+threshold can't separate them. A model reading the actual code can. The relevance
+prompt is told explicitly that retrieval always returns *something*, so being from
+the same repo or sharing keywords is not the same as answering.
+
+**Hooked into `explore` at the `quick_answer` beat (`tutor.py`).** Right before
+the short answer, `judge_relevance` runs and `_relevance_note` prints an honest
+heads-up only when the verdict isn't `answers` — stating the retrieved code may
+not answer the question, giving the judge's reason, and naming the closest file as
+a best guess. A clean match stays silent (no clutter). One judge call per explore,
+paired with the one existing short-answer call.
+
+Verified offline: schema parsing across clean/fenced/malformed/out-of-range
+inputs, the `"null"`/`"none"`→None normalization, the unparseable→`cant_tell`
+degrade, the empty-hits short-circuit, and `_relevance_note` (silent on `answers`,
+names the closest file on `doesnt_answer`). Both CLIs register. **Live
+verification against Swerve still pending** (the audio query should pass; the orbs
+query — absent feature — should fire the heads-up) before commit.
+
 ## 2026-06-09 — Explore polish: answer up front, revisit refreshers, drop the weak-match warning
 
 Post-Phase-2 refinements to the `explore` flow, surfaced by live use (all in

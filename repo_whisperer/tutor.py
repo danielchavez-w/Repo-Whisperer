@@ -44,7 +44,7 @@ import re
 import sys
 from dataclasses import dataclass
 
-from repo_whisperer import learning
+from repo_whisperer import judge, learning
 from repo_whisperer.answer import (
     ANSWER_MODEL,
     DEFAULT_TOP_K,
@@ -607,6 +607,29 @@ def _show_hits(query: str, hits: list[Hit], lead: str = "") -> None:
     print(lead + format_hits(query, hits))
 
 
+def _relevance_note(verdict: "judge.Verdict", hits: list[Hit]) -> str:
+    """An honest heads-up when the judge says retrieval didn't really answer.
+
+    Returns "" when the evidence answers the question, so a good match stays
+    uncluttered. Otherwise it states plainly that the retrieved code may not
+    answer the question, gives the judge's reason, and names the closest file as
+    a best guess. This is the model-judged replacement for the old
+    distance-threshold weak-match warning, which couldn't tell "feature absent"
+    from "feature worded differently" — a model reading the code can.
+    """
+    if verdict.answered:
+        return ""
+    heads = {
+        "partial": "⚠  Heads-up: the retrieved code only partly covers your question.",
+        "doesnt_answer": "⚠  Heads-up: the retrieved code doesn't look like it actually answers that.",
+        "cant_tell": "⚠  Heads-up: I'm not sure the retrieved code answers that.",
+    }
+    lines = [heads.get(verdict.verdict, heads["cant_tell"]), f"   {verdict.reason}"]
+    if verdict.verdict != "partial" and hits:
+        lines.append(f"   Closest file retrieved: {hits[0].path}")
+    return "\n".join(lines)
+
+
 # Natural affirmatives that count as "yes" at a [Y/n] prompt. A learner shouldn't
 # have to know the one magic letter — "yeah", "sure", "ok" all plainly mean yes,
 # and Enter (the empty string) takes the capital-Y default. Anything not in here
@@ -949,6 +972,14 @@ def explore(
         return ExploreResult(
             query=query, hits=hits, offer=offer, accepted=None, level=level,
         )
+
+    # Model-judged relevance — hung on the same beat as the short answer. Let the
+    # model decide whether the retrieved code actually answers the question and
+    # say so honestly when it doesn't, replacing the old distance-threshold
+    # heads-up that couldn't tell "feature absent" from "worded differently".
+    rel_note = _relevance_note(judge.judge_relevance(query, hits, model=model), hits)
+    if rel_note:
+        print("\n" + rel_note)
 
     # Answer the question itself up front (feature 1), before offering the deeper
     # lesson — so a "how does X work?" ask is always answered, not gated behind
