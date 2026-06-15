@@ -23,3 +23,8 @@ numpy<2
 
 # Load the Anthropic API key from .env
 python-dotenv>=1.0.0
+
+# Phase 3 (screen-aware verification), macOS only: CoreGraphics window
+# enumeration + Screen-Recording permission preflight for on-demand capture.
+# (Step 2 capture plumbing — feeds screenshots to the vision call.)
+pyobjc-framework-Quartz>=10.0 ; sys_platform == "darwin"

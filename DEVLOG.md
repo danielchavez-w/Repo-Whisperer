@@ -1,5 +1,51 @@
 # Development Log
 
+## 2026-06-15 — Phase 3, Step 2: capture plumbing (de-risking spike)
+
+Proved the **screenshot → vision** pipeline in isolation before any
+learner-facing verification rests on it. New `repo_whisperer/capture.py`,
+standalone and untouching `explore`/`tutor.py`/the judge schema. Step 3
+(comprehension verification) will reuse this plumbing, feeding a captured frame
+to the existing `Verdict` judge with image evidence.
+
+What it does:
+
+- **On-demand single frame**, never continuous or periodic — one explicit
+  `screencapture` call (macOS), absolute path `/usr/sbin/screencapture` so a
+  tampered `PATH` can't shadow it; `-x` silent, `-t png`.
+- **Active editor window by default**, not the whole desktop. Windows are
+  enumerated front-to-back via CoreGraphics (`CGWindowListCopyWindowInfo`,
+  layer-0 + size filter), and the target is grabbed non-interactively by id
+  (`-l<id> -o`). `--screen` is the whole-screen fallback; `--window <id>` pins
+  an exact window; `--list` prints capturable windows with ids.
+- **Alt-tab edge case** ("don't capture the tutor looking at itself"): the
+  "last non-tutor window" rule walks front-to-back and skips dedicated terminal
+  emulators (`TERMINAL_OWNERS`), so when you tab to the tutor's terminal to
+  trigger a capture it grabs the editor behind it. Editor apps (VS Code, Cursor,
+  Windsurf) are deliberately NOT excluded by default — they commonly host an
+  integrated terminal AND show the code we want — so `--exclude APP` is offered
+  for the cases that need it.
+- **Permission gate, human message not stack trace:** `CGPreflightScreenCapture
+  Access` preflights; if absent we fire the one-time `CGRequestScreenCapture
+  Access` prompt, then re-check, and on a hard no raise `PermissionDeniedError`
+  carrying `PERMISSION_MESSAGE` (System Settings → Privacy & Security → Screen
+  Recording, then reopen the app). A silently-blocked grab is also caught by an
+  empty/too-small file check and re-routed to the same message.
+- **No artifacts left behind:** frames go to a `tempfile` PNG; `captured_frame()`
+  is a context manager that unlinks it on exit (`--keep`/`--no-vision` retain it
+  for inspection), and a failed capture cleans up its temp file too.
+
+**The de-risking test** (the point of the step): the standalone runner
+`python -m repo_whisperer.capture` captures one frame and sends it to Opus 4.8
+as an image block (`read_frame`), asking it to transcribe the code/text it can
+read — confirming the model reads code legibly off real pixels before
+verification is built on top. Vision model reuses the Phase 1 `ANSWER_MODEL` and
+the shared `answer._client`.
+
+New dependency (macOS only): `pyobjc-framework-Quartz` for window enumeration +
+the permission preflight.
+
+
 ## 2026-06-13 — Design thread (carried forward): a "practice space"
 
 Captured mid-Phase-3, not scoped — recording the idea so it isn't lost. Right
