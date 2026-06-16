@@ -10,7 +10,10 @@ It is built in three phases:
 - **Phase 2 (DONE):** Tutoring loop — show the code, answer the question, teach
   it Socratically at your level, run follow-ups and a light comprehension check,
   and nudge toward related threads you haven't explored yet.
-- **Phase 3 (later):** Screen-aware verification using the vision API.
+- **Phase 3 (in progress):** Screen-aware tutoring via the vision API. The tutor
+  can now *see* your editor: highlight any code and it teaches that selection,
+  grounding the lesson in both the screenshot and the rest of the ingested repo
+  (`look`). Screen-aware verification (a `check` command) is the next step.
 
 ## What it does
 
@@ -24,16 +27,22 @@ A CLI tool that:
    question up front, then offers a guided walkthrough pitched at your level,
    takes in-lesson follow-ups, offers an optional comprehension check, and
    suggests related unexplored threads to wander into next (`explore`).
+5. **Looks at your screen** (Phase 3, macOS): takes one announced screenshot of
+   your editor and teaches the code you've **highlighted** — grounded in both the
+   screenshot (your exact selection) and related chunks pulled from the ingested
+   repo, so the lesson can reach off-screen context with citations (`look`).
 
 Embeddings run locally (`sentence-transformers`, `all-MiniLM-L6-v2`), so only the
-answering and teaching calls hit the Anthropic API.
+answering, teaching, and screen-reading calls hit the Anthropic API.
 
 ## Stack
 
 - Python 3.11+
-- Anthropic API (`claude-opus-4-8`) for answering and teaching
+- Anthropic API (`claude-opus-4-8`) for answering, teaching, and reading the screen
 - ChromaDB for local, persistent vector storage
 - `sentence-transformers` (`all-MiniLM-L6-v2`) for local embeddings
+- `look` is macOS-only — it uses `screencapture` plus `pyobjc-framework-Quartz`
+  for window enumeration and the Screen Recording permission check
 
 ## Setup
 
@@ -70,6 +79,9 @@ python -m repo_whisperer ask "how does X work?"
 
 # 2b. Explore and be taught a thread (Phase 2)
 python -m repo_whisperer explore "how do the collectibles work?"
+
+# 2c. Highlight code in your editor, then have it taught (Phase 3, macOS)
+python -m repo_whisperer look
 ```
 
 The store holds **one repo at a time** — re-running `ingest` rebuilds the
@@ -110,6 +122,34 @@ distances) are printed beneath so you can verify the grounding.
    you haven't explored yet (steering away from covered ground). Pick one by
    number, type your own topic, or press Enter to stop — always your call.
 
+### `look` — teach what you highlight (Phase 3, macOS)
+
+`look` gives the tutor sight. Open a file in your editor, **highlight** the code
+you want explained, then run it:
+
+```bash
+python -m repo_whisperer look
+```
+
+1. **One announced screenshot.** It tells you what it's about to capture and takes
+   exactly one frame of your **active editor window** — never continuous, never in
+   the background. Nothing is captured unless you run the command. (First use
+   prompts for macOS Screen Recording permission; grant it and reopen the app.)
+2. **Teaches your highlighted selection** specifically — not a tour of the whole
+   file — reading the colored selection straight off the screenshot.
+3. **Grounds it in the whole repo.** It uses your selection to retrieve related
+   code from the ingested store, so the lesson can reach **off-screen** context —
+   "this gets consumed over in `player.js:120-138`," "the geometry is built at
+   `collectibles.js:40`" — with `path:start-end` citations, the same way `explore`
+   cites. Ingest the repo you're studying first (`ingest <path>`) so it has that
+   context; with no repo ingested it falls back to teaching from the screen alone
+   and tells you to ingest for full-project context.
+4. **Same tutor.** Pitched at your saved level and connected to threads you've
+   already covered, in the same voice as `explore`.
+
+If nothing is clearly highlighted, it asks you to highlight the part you want
+rather than dumping the whole file.
+
 Options:
 
 - `ingest`: `--db DIR` (store location), `--window N` / `--overlap M` (chunking),
@@ -117,3 +157,8 @@ Options:
 - `ask`: `--db DIR`, `-k N` (number of chunks to retrieve, default 6).
 - `explore`: `--db DIR`, `-k N`, `--level beginner|intermediate|advanced`,
   `--state FILE`.
+- `look`: `--db DIR`, `-k N` (related chunks to retrieve), `--level
+  beginner|intermediate|advanced`, `--state FILE`, `--screen` (capture the whole
+  screen instead of the active window), `--window ID` (pin an exact window),
+  `--exclude APP` (skip an app when picking the window), `--keep` (keep the
+  screenshot file).
