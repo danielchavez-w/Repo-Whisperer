@@ -44,7 +44,7 @@ import re
 import sys
 from dataclasses import dataclass
 
-from repo_whisperer import judge, learning
+from repo_whisperer import capture, judge, learning
 from repo_whisperer.answer import (
     ANSWER_MODEL,
     DEFAULT_TOP_K,
@@ -219,6 +219,38 @@ TEACH_SYSTEM_PROMPT = (
     "paragraphs a curious adult can follow."
 )
 
+# Step 3 — teaching from sight. Same tutor, now looking over the learner's
+# shoulder at the editor: the grounding is a SCREENSHOT (the whole visible file
+# plus a highlighted selection) instead of retrieved chunks, and the lesson is
+# scoped to the highlight. NOT verification — no quiz, no grade, no judge.
+SCREEN_TEACH_SYSTEM_PROMPT = (
+    "You are a patient expert coding tutor sitting beside a learner, looking over "
+    "their shoulder at the code on their screen. You are given a SCREENSHOT of "
+    "their editor: the whole visible file, with one part HIGHLIGHTED (shown by a "
+    "colored selection background) — that highlight is the specific code they are "
+    "pointing at and want explained.\n\n"
+    "Your job: teach the HIGHLIGHTED selection, specifically.\n\n"
+    "Rules:\n"
+    "- Teach ONLY the highlighted/selected code. Use the rest of the visible file "
+    "as CONTEXT — to see what the selection calls, what calls it, and where it "
+    "sits — but do NOT give a tour of the whole file. Keep the lesson scoped to "
+    "the selection.\n"
+    "- Read the screen faithfully and ground the lesson in the code actually "
+    "visible, referring to the real identifiers you can see. If part of the "
+    "selection is cut off or too small to read, say so rather than guessing what "
+    "it says.\n"
+    "- If nothing is clearly highlighted (you cannot see a selection), do NOT "
+    "default to teaching the whole file. Briefly say you can't tell which part "
+    "they mean and ask them to highlight the specific code they want explained, "
+    "then stop.\n"
+    "- Teach in a real teaching voice: explain the WHY and the flow of the "
+    "selected code, not just a restatement of the lines. Start from what this "
+    "selection does and how it fits, then walk the key mechanism.\n"
+    "- You are a patient expert looking at the page they're pointing to — never a "
+    "proctor. Do NOT quiz them, grade them, or set exercises; just teach.\n"
+    "- Be warm and concrete — a few focused paragraphs a curious adult can follow."
+)
+
 FOLLOWUP_SYSTEM_PROMPT = (
     "You are a patient expert coding tutor. The learner is in the middle of a "
     "lesson about one thread of a codebase and has a follow-up question — e.g. "
@@ -312,12 +344,16 @@ _CONTINUE_INSTRUCTION = (
 
 def _ask_model(
     system: str,
-    user: str,
+    user: str | list[dict],
     max_tokens: int,
     model: str,
     max_continuations: int = 0,
 ) -> str:
     """Anthropic call returning the concatenated text blocks.
+
+    `user` is either plain text or a content-block list (e.g. an image block plus
+    a text instruction) — the latter is how the screen-aware tutor teaches from a
+    screenshot. Either way the reply is text.
 
     When `max_continuations > 0` and a reply is truncated because it hit the token
     ceiling (`stop_reason == "max_tokens"`), this makes up to that many follow-up
@@ -467,6 +503,37 @@ def teach_thread(
     system = f"{TEACH_SYSTEM_PROMPT}\n\n{_level_block(level)}"
     return _ask_model(
         system, user_message, MAX_TEACH_TOKENS, model,
+        max_continuations=MAX_TEACH_CONTINUATIONS,
+    )
+
+
+def teach_from_screen(
+    frame: "capture.Frame",
+    level: str = DEFAULT_LEVEL,
+    prior: str = "",
+    model: str = TEACH_MODEL,
+) -> str:
+    """Teach the highlighted selection in `frame`, the visible file as context.
+
+    The same tutor as `teach_thread`, but grounded in a SCREENSHOT instead of
+    retrieved chunks: the model is sent the captured editor frame as an image and
+    asked to teach the highlighted code specifically (scoped to the selection, not
+    the whole file), pitched at `level` (vocabulary only). `prior`, when non-empty,
+    lets it cross-reference threads already taught — the same warm, connected voice
+    the text path uses. This is purely sight-as-context teaching; there is no
+    verification, quiz, or judge here. Raises ValueError on an unknown level or a
+    missing API key.
+    """
+    _check_level(level)
+    instruction = (
+        "This is a screenshot of my editor. Teach me the HIGHLIGHTED selection "
+        "specifically, using the rest of the visible file as context. If nothing "
+        "is clearly highlighted, ask me to highlight the part I want explained."
+    )
+    content = [capture.image_block(frame), {"type": "text", "text": instruction}]
+    system = f"{SCREEN_TEACH_SYSTEM_PROMPT}\n\n{_level_block(level)}{_prior_note(prior)}"
+    return _ask_model(
+        system, content, MAX_TEACH_TOKENS, model,
         max_continuations=MAX_TEACH_CONTINUATIONS,
     )
 
@@ -1038,6 +1105,63 @@ def explore(
         teaching=teaching,
         level=final_level,
     )
+
+
+def look(
+    mode: str = "window",
+    window_id: int | None = None,
+    exclude: frozenset[str] | set[str] | tuple = (),
+    level: str | None = None,
+    model: str = TEACH_MODEL,
+    state_path: str | None = DEFAULT_STATE_PATH,
+    keep: bool = False,
+    input_fn=input,
+) -> str | None:
+    """Look at the code on the learner's screen and teach the highlighted part.
+
+    The opt-in, announced way to give the tutor sight (Step 3). It runs only when
+    invoked and takes exactly ONE screenshot, announced before it happens — never
+    continuous, never in the background. By default it captures the active editor
+    window (reusing the Step 2 capture module, last-non-tutor-window rule);
+    `mode="screen"` grabs the whole display and `window_id` pins an exact window.
+
+    It then teaches the HIGHLIGHTED selection at the learner's saved level, in the
+    same voice as the text path (`teach_from_screen`), and returns the lesson text
+    — or None if the capture failed (permission or no window), having printed a
+    human message. The learning level is read from `state_path` for consistency
+    with their `explore` sessions; nothing is written (a screenshot lesson has no
+    chunk citations to record as a thread).
+    """
+    state = learning.load_state(state_path)
+    level = level or state.level or DEFAULT_LEVEL
+    _check_level(level)
+
+    where = (
+        "your whole screen"
+        if mode == "screen"
+        else (f"window {window_id}" if window_id is not None else "your active editor window")
+    )
+    print(f"📸 Taking one screenshot of {where} to look at the code with you.")
+    print("   (Nothing else is captured — this is the only frame, taken right now.)")
+
+    try:
+        with capture.captured_frame(
+            mode=mode, exclude=set(exclude), window_id=window_id, keep=keep,
+        ) as frame:
+            print(f"\nCaptured {capture.describe_frame(frame)}.")
+            print("Reading the screen and teaching the highlighted part…")
+            prior = state.prior_brief()
+            lesson = teach_from_screen(frame, level=level, prior=prior, model=model)
+    except capture.PermissionDeniedError as exc:
+        print(f"\n{exc}", file=sys.stderr)
+        return None
+    except capture.CaptureError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
+
+    print("\n" + "-" * 60)
+    print(lesson)
+    return lesson
 
 
 def _main(argv: list[str]) -> int:

@@ -5,14 +5,17 @@ Ties the engine together into the commands the learner uses:
     python -m repo_whisperer ingest <path-to-repo>     # index a repo
     python -m repo_whisperer ask "<question>"          # grounded, cited answer
     python -m repo_whisperer explore "<where is X>"    # show code + offer to teach
+    python -m repo_whisperer look                      # teach the code you highlight
 
 `ingest` walks → chunks → embeds → stores a repo (rebuilding the collection);
 `ask` retrieves the most relevant chunks and prints a grounded, cited answer
 (Phase 1). `explore` is the Phase 2 tutoring loop: it shows the relevant code,
 offers to teach it, teaches at the learner's level, and afterwards suggests
-related unexplored threads to keep the session going. All default to the
-`chroma_db/` store, so a typical session is one `ingest` followed by as many
-`ask`s and `explore`s as you like.
+related unexplored threads to keep the session going. `look` (Phase 3) gives the
+tutor sight: it takes one announced screenshot of your editor and teaches the
+code you've highlighted, using the rest of the visible file as context. `ask`,
+`explore`, and `look` default to the `chroma_db/` store, so a typical session is
+one `ingest` followed by as many of them as you like.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from repo_whisperer.store import (
     DEFAULT_WINDOW,
     ingest_repo,
 )
-from repo_whisperer.tutor import LEVELS, explore
+from repo_whisperer.tutor import LEVELS, explore, look
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
@@ -81,6 +84,18 @@ def _cmd_explore(args: argparse.Namespace) -> int:
         level=args.level, state_path=args.state,
     )
     return 0
+
+
+def _cmd_look(args: argparse.Namespace) -> int:
+    teaching = look(
+        mode="screen" if args.screen else "window",
+        window_id=args.window_id,
+        exclude=set(args.exclude),
+        level=args.level,
+        state_path=args.state,
+        keep=args.keep,
+    )
+    return 0 if teaching is not None else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -158,6 +173,43 @@ def main(argv: list[str] | None = None) -> int:
         help=f"learning-state file (default: {DEFAULT_STATE_PATH})",
     )
     p_explore.set_defaults(func=_cmd_explore)
+
+    p_look = sub.add_parser(
+        "look", help="look at the code on your screen and teach the highlighted part",
+        description=(
+            "Phase 3 screen-aware teaching: take one announced screenshot of your "
+            "active editor window and teach the code you've HIGHLIGHTED, using the "
+            "rest of the visible file as context — at your saved level, in the same "
+            "tutor voice. Opt-in and one-shot: nothing is captured unless you run "
+            "this. Highlight the function (or lines) you want explained first."
+        ),
+    )
+    p_look.add_argument(
+        "--screen", action="store_true",
+        help="capture the whole screen instead of the active editor window",
+    )
+    p_look.add_argument(
+        "--window", type=int, metavar="ID", dest="window_id",
+        help="capture an exact window id "
+             "(see `python -m repo_whisperer.capture --list`)",
+    )
+    p_look.add_argument(
+        "--exclude", action="append", default=[], metavar="APP",
+        help="extra app/owner name to skip when picking the window (repeatable)",
+    )
+    p_look.add_argument(
+        "--level", choices=LEVELS, default=None,
+        help="teaching altitude (default: your saved level, else beginner)",
+    )
+    p_look.add_argument(
+        "--keep", action="store_true",
+        help="keep the screenshot file instead of deleting it after the lesson",
+    )
+    p_look.add_argument(
+        "--state", default=DEFAULT_STATE_PATH, metavar="FILE",
+        help=f"learning-state file (default: {DEFAULT_STATE_PATH})",
+    )
+    p_look.set_defaults(func=_cmd_look)
 
     args = parser.parse_args(argv)
 

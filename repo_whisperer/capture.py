@@ -380,6 +380,27 @@ def captured_frame(
 # --- the vision round-trip (the actual de-risking test) -------------------
 
 
+def image_block(frame: Frame) -> dict:
+    """The Anthropic image content block (base64 PNG) for `frame`.
+
+    Factored out of `read_frame` so other modules can compose their OWN vision
+    message around a captured frame without duplicating the encoding — Step 3's
+    screen-aware tutor builds an image-block + teaching-instruction message this
+    way. The frame's PNG is read fresh from disk on each call, so the caller must
+    keep the file alive (e.g. inside `captured_frame`) until the request is sent.
+    """
+    with open(frame.path, "rb") as fh:
+        encoded = base64.standard_b64encode(fh.read()).decode("ascii")
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": encoded,
+        },
+    }
+
+
 def read_frame(frame: Frame, model: str = VISION_MODEL) -> str:
     """Send the captured frame to the model and return what it reads back.
 
@@ -387,9 +408,6 @@ def read_frame(frame: Frame, model: str = VISION_MODEL) -> str:
     screenshot before verification is built on top. Raises ValueError (via
     `_client`) if the API key is missing.
     """
-    with open(frame.path, "rb") as fh:
-        encoded = base64.standard_b64encode(fh.read()).decode("ascii")
-
     client = _client()
     response = client.messages.create(
         model=model,
@@ -398,14 +416,7 @@ def read_frame(frame: Frame, model: str = VISION_MODEL) -> str:
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": encoded,
-                        },
-                    },
+                    image_block(frame),
                     {"type": "text", "text": VISION_PROMPT},
                 ],
             }
@@ -419,7 +430,7 @@ def read_frame(frame: Frame, model: str = VISION_MODEL) -> str:
 # --- standalone runner -----------------------------------------------------
 
 
-def _describe_frame(frame: Frame) -> str:
+def describe_frame(frame: Frame) -> str:
     """One-line summary of what was captured, for the terminal."""
     if frame.mode == "screen":
         return "whole screen"
@@ -498,7 +509,7 @@ def _main(argv: list[str]) -> int:
             window_id=args.window_id,
             keep=keep,
         ) as frame:
-            print(f"Captured {_describe_frame(frame)}")
+            print(f"Captured {describe_frame(frame)}")
             if keep:
                 print(f"Saved: {frame.path}")
             if args.no_vision:

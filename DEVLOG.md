@@ -1,5 +1,54 @@
 # Development Log
 
+## 2026-06-15 — Phase 3, Step 3: screen-as-context teaching, scoped by highlight
+
+The tutor gains **sight**. New opt-in `look` command: it takes ONE announced
+screenshot of the active editor window and teaches the code you've
+**highlighted**, using the rest of the visible file as context — at your saved
+level, in the same Socratic voice. Verified live against a real file open in
+Cursor: highlight a function, run `look`, and it teaches that selection (using
+file context) and not the whole file.
+
+**Reframe from the original Phase 3 doc:** Step 3 is NOT verification/quizzing.
+It's the tutor gaining sight so it can teach the specific part the learner points
+at, grounded in on-screen context — "a patient expert looking over my shoulder at
+the page I'm pointing to," never a proctor. The checking/verification flavor
+(and the judge schema) stays reserved for Step 4's `check` command; this step
+does not touch it.
+
+What it does:
+
+- **Opt-in, announced, one-shot.** Nothing is captured unless you run `look`; it
+  announces the single frame before taking it. Default text-only `explore` is
+  completely unchanged.
+- **Reuses the Step 2 capture module**, doesn't rebuild it: active editor window
+  by default (last-non-tutor-window rule, so the tutor's own terminal is skipped
+  and the editor behind it is grabbed), `--screen` whole-screen fallback,
+  `--window <id>` to pin, `--exclude APP` for edge cases.
+- **Teaches the highlighted selection specifically.** The screenshot shows the
+  whole visible file AND the colored selection background (Step 2 proved Opus
+  reads the screen faithfully, so the highlight is simply visible in the image).
+  The prompt scopes the lesson to the selection and uses the rest of the file as
+  context — what the selection calls, what calls it, where it sits — and
+  explicitly does NOT tour the whole file. If nothing is clearly highlighted it
+  asks the learner to highlight the part they want rather than dumping the file.
+- **Same tutor, same calibration.** Pitched at the learner's saved level
+  (`_level_block`) and handed the prior-threads brief for cross-references, like
+  the text path. Reads the level from learning state but writes nothing — a
+  screenshot lesson has no chunk citations to record as a thread.
+
+Plumbing:
+
+- `capture.image_block(frame)` factored out of `read_frame` so the tutor composes
+  its own vision message around a frame without duplicating the base64 encoding;
+  `capture.describe_frame` made public for the capture announcement.
+- `tutor._ask_model` generalized to accept an image-content list (not just text),
+  so the existing truncation/continuation handling carries over to vision calls.
+- New `tutor.SCREEN_TEACH_SYSTEM_PROMPT` + `teach_from_screen(frame, level,
+  prior)` and the `look(...)` orchestrator (announce → capture → teach), wired to
+  a thin `look` subcommand in `cli.py`.
+
+
 ## 2026-06-15 — Phase 3, Step 2: capture plumbing (de-risking spike)
 
 Proved the **screenshot → vision** pipeline in isolation before any
