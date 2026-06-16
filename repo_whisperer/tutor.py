@@ -221,14 +221,18 @@ TEACH_SYSTEM_PROMPT = (
 
 # Step 3 — teaching from sight. Same tutor, now looking over the learner's
 # shoulder at the editor: the grounding is a SCREENSHOT (the whole visible file
-# plus a highlighted selection) instead of retrieved chunks, and the lesson is
-# scoped to the highlight. NOT verification — no quiz, no grade, no judge.
+# plus a highlighted selection). Step 3.5 fuses in retrieval — the lesson is
+# scoped to the highlight but may also be handed RELATED CHUNKS pulled from the
+# ingested repo (off-screen context). NOT verification — no quiz, grade, judge.
 SCREEN_TEACH_SYSTEM_PROMPT = (
     "You are a patient expert coding tutor sitting beside a learner, looking over "
     "their shoulder at the code on their screen. You are given a SCREENSHOT of "
     "their editor: the whole visible file, with one part HIGHLIGHTED (shown by a "
     "colored selection background) — that highlight is the specific code they are "
-    "pointing at and want explained.\n\n"
+    "pointing at and want explained. You may ALSO be given related code excerpts "
+    "retrieved from elsewhere in the same repository, each labeled with a "
+    "`path:start-end` citation key — these are off-screen context the screenshot "
+    "can't show.\n\n"
     "Your job: teach the HIGHLIGHTED selection, specifically.\n\n"
     "Rules:\n"
     "- Teach ONLY the highlighted/selected code. Use the rest of the visible file "
@@ -239,6 +243,13 @@ SCREEN_TEACH_SYSTEM_PROMPT = (
     "visible, referring to the real identifiers you can see. If part of the "
     "selection is cut off or too small to read, say so rather than guessing what "
     "it says.\n"
+    "- When the retrieved excerpts genuinely illuminate the selection, USE them to "
+    "reach beyond the visible file — where the selection's data, types, geometry, "
+    "or callers/callees live, what consumes its output — and CITE the relevant "
+    "`path:start-end` key when you do (e.g. \"these get checked for collection "
+    "over in `player.js:120-138`\"). Pull in real off-screen detail; don't invent "
+    "connections the excerpts don't support, and stay anchored to the selection — "
+    "the excerpts are supporting context, not new threads to tour.\n"
     "- If nothing is clearly highlighted (you cannot see a selection), do NOT "
     "default to teaching the whole file. Briefly say you can't tell which part "
     "they mean and ask them to highlight the specific code they want explained, "
@@ -249,6 +260,22 @@ SCREEN_TEACH_SYSTEM_PROMPT = (
     "- You are a patient expert looking at the page they're pointing to — never a "
     "proctor. Do NOT quiz them, grade them, or set exercises; just teach.\n"
     "- Be warm and concrete — a few focused paragraphs a curious adult can follow."
+)
+
+# Returned by the selection-transcriber when no highlight is visible, so the
+# caller skips retrieval (no query to run) and lets the teaching prompt ask the
+# learner to highlight something.
+NO_SELECTION_SENTINEL: str = "NO_SELECTION"
+
+SELECTION_READ_SYSTEM_PROMPT = (
+    "You are reading a screenshot of a code editor to extract ONE thing: the code "
+    "the user has HIGHLIGHTED (shown by a colored selection background). "
+    "Transcribe ONLY the highlighted/selected code, as plain text, exactly as it "
+    "appears — preserve identifiers and structure. Output just that code: no "
+    "explanation, no commentary, no markdown fences. This text is used to search "
+    "the rest of the codebase, so accuracy of the real identifiers matters more "
+    "than perfect formatting. If no selection is visible (nothing is highlighted), "
+    f"reply with exactly {NO_SELECTION_SENTINEL} and nothing else."
 )
 
 FOLLOWUP_SYSTEM_PROMPT = (
@@ -507,28 +534,63 @@ def teach_thread(
     )
 
 
+def transcribe_selection(
+    frame: "capture.Frame", model: str = TEACH_MODEL
+) -> str:
+    """Read just the HIGHLIGHTED code out of `frame`, for use as a retrieval query.
+
+    A focused vision read (Step 3.5): returns the selected code as plain text so it
+    can be embedded and run against the ingested store to pull related off-screen
+    chunks. Returns "" when no selection is visible (the model replies with
+    `NO_SELECTION_SENTINEL`), so the caller knows to skip retrieval. Raises
+    ValueError (via `_client`) if the API key is missing.
+    """
+    instruction = (
+        "Transcribe only the highlighted/selected code in this editor screenshot, "
+        "exactly as shown. If nothing is highlighted, reply with exactly "
+        f"{NO_SELECTION_SENTINEL}."
+    )
+    content = [capture.image_block(frame), {"type": "text", "text": instruction}]
+    text = _ask_model(
+        SELECTION_READ_SYSTEM_PROMPT, content, MAX_QUICK_ANSWER_TOKENS, model
+    )
+    return "" if text.strip().upper().startswith(NO_SELECTION_SENTINEL) else text
+
+
 def teach_from_screen(
     frame: "capture.Frame",
+    hits: list[Hit] | None = None,
     level: str = DEFAULT_LEVEL,
     prior: str = "",
     model: str = TEACH_MODEL,
 ) -> str:
-    """Teach the highlighted selection in `frame`, the visible file as context.
+    """Teach the highlighted selection in `frame`, grounded in screen + repo.
 
-    The same tutor as `teach_thread`, but grounded in a SCREENSHOT instead of
-    retrieved chunks: the model is sent the captured editor frame as an image and
-    asked to teach the highlighted code specifically (scoped to the selection, not
-    the whole file), pitched at `level` (vocabulary only). `prior`, when non-empty,
-    lets it cross-reference threads already taught — the same warm, connected voice
-    the text path uses. This is purely sight-as-context teaching; there is no
-    verification, quiz, or judge here. Raises ValueError on an unknown level or a
-    missing API key.
+    The same tutor as `teach_thread`, but its evidence is a SCREENSHOT (the exact
+    highlighted selection, visually) optionally fused with `hits` — related chunks
+    retrieved from the ingested repo that the screen can't show (Step 3.5). The
+    model teaches the highlighted code specifically (scoped to the selection, not a
+    tour of the file), reaching into the retrieved excerpts for off-screen context
+    and citing their `path:start-end` keys. With `hits` empty it degrades to pure
+    screen-only teaching (Step 3 behavior). Pitched at `level` (vocabulary only);
+    `prior`, when non-empty, lets it cross-reference threads already taught. This
+    is purely sight-plus-context teaching — no verification, quiz, or judge. Raises
+    ValueError on an unknown level or a missing API key.
     """
     _check_level(level)
+    hits = hits or []
+    context_note = ""
+    if hits:
+        context_note = (
+            "\n\nRelated code retrieved from elsewhere in the SAME repository — "
+            "off-screen context you can use and cite by its `path:start-end` "
+            f"key:\n\n{build_context(hits)}"
+        )
     instruction = (
         "This is a screenshot of my editor. Teach me the HIGHLIGHTED selection "
-        "specifically, using the rest of the visible file as context. If nothing "
-        "is clearly highlighted, ask me to highlight the part I want explained."
+        "specifically, using the rest of the visible file as immediate context. "
+        "If nothing is clearly highlighted, ask me to highlight the part I want "
+        "explained." + context_note
     )
     content = [capture.image_block(frame), {"type": "text", "text": instruction}]
     system = f"{SCREEN_TEACH_SYSTEM_PROMPT}\n\n{_level_block(level)}{_prior_note(prior)}"
@@ -1107,11 +1169,43 @@ def explore(
     )
 
 
+def _related_chunks(
+    frame: "capture.Frame", k: int, db_dir: str, model: str
+) -> tuple[list[Hit], str]:
+    """Pull repo chunks related to the highlighted selection in `frame`.
+
+    Step 3.5's fusion: transcribe just the highlighted code, then use it as a
+    retrieval query into the ingested store so the lesson can reach off-screen
+    context. Returns the retrieved hits plus a one-line status note for the
+    learner. Degrades cleanly — an empty/missing store (or no visible selection)
+    yields `[]` and a note explaining the lesson is screen-only — so `look` never
+    crashes just because nothing has been ingested.
+    """
+    selection = transcribe_selection(frame, model=model)
+    if not selection.strip():
+        # No highlight detected — nothing to query; teaching will ask for one.
+        return [], ""
+    try:
+        hits = retrieve(selection, k=k, db_dir=db_dir)
+    except ValueError:
+        return [], (
+            "No ingested repo found, so this lesson is screen-only (just what's "
+            "visible). For full-project context, run "
+            "`python -m repo_whisperer ingest <path-to-repo>` first."
+        )
+    if not hits:
+        return [], "The ingested repo had no related code, so this lesson is screen-only."
+    plural = "chunk" if len(hits) == 1 else "chunks"
+    return hits, f"Pulled {len(hits)} related {plural} from the ingested repo for context."
+
+
 def look(
     mode: str = "window",
     window_id: int | None = None,
     exclude: frozenset[str] | set[str] | tuple = (),
     level: str | None = None,
+    k: int = DEFAULT_TOP_K,
+    db_dir: str = "chroma_db",
     model: str = TEACH_MODEL,
     state_path: str | None = DEFAULT_STATE_PATH,
     keep: bool = False,
@@ -1119,18 +1213,21 @@ def look(
 ) -> str | None:
     """Look at the code on the learner's screen and teach the highlighted part.
 
-    The opt-in, announced way to give the tutor sight (Step 3). It runs only when
-    invoked and takes exactly ONE screenshot, announced before it happens — never
-    continuous, never in the background. By default it captures the active editor
-    window (reusing the Step 2 capture module, last-non-tutor-window rule);
-    `mode="screen"` grabs the whole display and `window_id` pins an exact window.
+    The opt-in, announced way to give the tutor sight (Step 3), now repo-aware
+    (Step 3.5). It runs only when invoked and takes exactly ONE screenshot,
+    announced before it happens — never continuous, never in the background. By
+    default it captures the active editor window (reusing the Step 2 capture
+    module, last-non-tutor-window rule); `mode="screen"` grabs the whole display
+    and `window_id` pins an exact window.
 
-    It then teaches the HIGHLIGHTED selection at the learner's saved level, in the
-    same voice as the text path (`teach_from_screen`), and returns the lesson text
-    — or None if the capture failed (permission or no window), having printed a
-    human message. The learning level is read from `state_path` for consistency
-    with their `explore` sessions; nothing is written (a screenshot lesson has no
-    chunk citations to record as a thread).
+    It then reads the highlighted selection, uses it to retrieve related chunks
+    from the ingested repo (`_related_chunks`), and teaches the selection grounded
+    in BOTH the screenshot and that off-screen context, citing `path:start-end`
+    keys (`teach_from_screen`). With no repo ingested it falls back to screen-only
+    teaching with a clear note. Returns the lesson text — or None if the capture
+    failed (permission or no window), having printed a human message. The level is
+    read from `state_path` for consistency with `explore`; nothing is written (a
+    screenshot lesson has no chunk citations to record as a thread).
     """
     state = learning.load_state(state_path)
     level = level or state.level or DEFAULT_LEVEL
@@ -1149,9 +1246,15 @@ def look(
             mode=mode, exclude=set(exclude), window_id=window_id, keep=keep,
         ) as frame:
             print(f"\nCaptured {capture.describe_frame(frame)}.")
-            print("Reading the screen and teaching the highlighted part…")
+            print("Reading the highlighted selection…")
+            hits, note = _related_chunks(frame, k=k, db_dir=db_dir, model=model)
+            if note:
+                print(note)
+            print("Teaching the highlighted part…")
             prior = state.prior_brief()
-            lesson = teach_from_screen(frame, level=level, prior=prior, model=model)
+            lesson = teach_from_screen(
+                frame, hits=hits, level=level, prior=prior, model=model,
+            )
     except capture.PermissionDeniedError as exc:
         print(f"\n{exc}", file=sys.stderr)
         return None

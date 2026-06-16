@@ -1,5 +1,58 @@
 # Development Log
 
+## 2026-06-15 — Phase 3, Step 3.5: make `look` repo-aware (fuse screen + retrieval)
+
+`look` no longer teaches from the screen alone. After it captures the highlighted
+selection, it reads that selection back as text, uses it as a **retrieval query
+into the ingested store**, and teaches the highlight grounded in **both** the
+screenshot (the exact selection, visually) and the retrieved off-screen chunks
+(the surrounding repo context the screen can't show) — citing `path:start-end`
+the way `explore` does.
+
+Verified live on Swerve: ingested Swerve, highlighted the `boostGeo` IIFE block
+at the top of `collectibles.js`, and the tutor taught that block while correctly
+citing its off-screen usage in `createBoost` (≈ lines 91–130) — pulled from
+retrieval, not visible on screen. That off-screen reference is the tell that 3.5
+is actually wired in and not just re-running Step 3.
+
+How it works:
+
+- **Selection → query.** A focused vision read (`transcribe_selection`)
+  transcribes ONLY the highlighted code and returns it as plain text; that text is
+  the retrieval query. No highlight → it returns the `NO_SELECTION` sentinel, so
+  retrieval is skipped and the teaching prompt asks the learner to highlight
+  something (unchanged Step 3 behavior).
+- **Reuse `explore`'s retrieval, don't rebuild.** The query goes straight through
+  the existing `answer.retrieve(...)` against the ingested ChromaDB store.
+- **Teach from both sources.** `teach_from_screen` now also takes the retrieved
+  `hits`: the screenshot is sent as the image (exact selection), the chunks are
+  appended as labeled `path:start-end` context, and the prompt is told to reach
+  into them for off-screen detail (callers/callees, where types/geometry live) and
+  cite the keys — while staying scoped to the selection, not touring the file.
+- **Screen for the exact selection, ingested repo for the surrounding truth.**
+
+Graceful fallback (the requirement): `look` now depends on an ingested repo, but
+**never crashes without one**. If the store is missing or empty,
+`_related_chunks` catches it, teaching falls back to screen-only (Step 3
+behavior), and the learner sees a clear note to run `ingest <path>` for
+full-project context. A status line (`Pulled N related chunks…`) shows when
+retrieval did land. New `--db` / `-k` flags on the `look` command mirror
+`explore`/`ask`.
+
+Still out of scope and untouched: the judge / verdict schema and any
+verification — that remains Step 4.
+
+**Carried-forward design question (flagged, not solved):** there is one ingested
+repo at a time (the last one ingested), so `look` trusts that the on-screen file
+belongs to it — "ingest the repo you're studying, then `look` at it." That
+contract is fine for now, but `look` should eventually detect which repo the
+on-screen file actually belongs to and pull from the matching store, so the
+screen (exact selection) and the knowledge (retrieved context) can't silently
+mismatch — e.g. highlighting in repo A while the store holds repo B would teach
+with confidently wrong off-screen citations. Worth revisiting once multi-repo
+stores exist.
+
+
 ## 2026-06-15 — Phase 3, Step 3: screen-as-context teaching, scoped by highlight
 
 The tutor gains **sight**. New opt-in `look` command: it takes ONE announced

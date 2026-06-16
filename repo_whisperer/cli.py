@@ -92,6 +92,8 @@ def _cmd_look(args: argparse.Namespace) -> int:
         window_id=args.window_id,
         exclude=set(args.exclude),
         level=args.level,
+        k=args.top_k,
+        db_dir=args.db,
         state_path=args.state,
         keep=args.keep,
     )
@@ -196,6 +198,14 @@ def main(argv: list[str] | None = None) -> int:
     p_look.add_argument(
         "--exclude", action="append", default=[], metavar="APP",
         help="extra app/owner name to skip when picking the window (repeatable)",
+    )
+    p_look.add_argument(
+        "--db", default=DEFAULT_DB_DIR, metavar="DIR",
+        help=f"ChromaDB store to pull repo context from (default: {DEFAULT_DB_DIR})",
+    )
+    p_look.add_argument(
+        "-k", "--top-k", type=int, default=DEFAULT_TOP_K, dest="top_k",
+        help=f"related chunks to retrieve for context (default: {DEFAULT_TOP_K})",
     )
     p_look.add_argument(
         "--level", choices=LEVELS, default=None,
