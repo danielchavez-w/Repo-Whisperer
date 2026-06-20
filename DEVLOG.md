@@ -1,5 +1,55 @@
 # Development Log
 
+## 2026-06-19 — Make `look` interactive: follow-up Q&A on the highlighted selection
+
+`look` was one-shot — capture the highlight, teach it, stop. Now the lesson opens
+into a **back-and-forth**, the way `explore`'s in-lesson follow-ups already work,
+so the learner can question the selection until it genuinely clicks. This lands
+**before** Step 4 on purpose: `check` (write code from a thread, then verify it)
+only means something if the learner understood the thread well enough to act on
+it, and a single explanation often isn't deep enough. So this is a dependency of
+Step 4, not a detour.
+
+The design — **Option A, drill into one highlight:**
+
+- Highlight once. `look` captures and teaches it exactly as before (screenshot
+  for the exact selection + repo chunks for surrounding context).
+- Then a follow-up loop (`_run_screen_followups`): ask questions about that
+  selection and the tutor answers them in the same context, like `explore`'s
+  follow-ups but anchored to a screen selection instead of a text query.
+- **Every follow-up is answered against the SAME evidence already in hand** — the
+  original screenshot of the selection AND the repo chunks pulled at capture time.
+  **No re-capture per question.** Highlight once, converse about that selection
+  with the context already loaded; want a new selection, run `look` again.
+- `level <tier>` re-teaches the same selection from the same screenshot at a new
+  altitude (reuses `teach_from_screen`); blank line / `done` / EOF / Ctrl-C all
+  exit cleanly.
+
+The one structural correctness point: **the loop runs INSIDE the
+`with capture.captured_frame(...)` block.** `capture.image_block` re-reads the PNG
+from disk on every call and `captured_frame` deletes it on exit, so to keep
+answering against the same frame with no re-capture, the file has to stay alive
+until the learner is done. `look` still calls `captured_frame` exactly once.
+
+Reuse, don't rebuild: the new `answer_screen_followup` is the screen twin of
+`answer_followup` — it composes the same image-block + repo `hits` +
+`lesson`-so-far message and reuses `_ask_model`; the new
+`SCREEN_FOLLOWUP_SYSTEM_PROMPT` mirrors `FOLLOWUP_SYSTEM_PROMPT` but keeps the
+answer scoped to the highlighted selection (deeper on it or its repo
+connections, never a tour of the file).
+
+Verified offline (model calls stubbed): follow-ups route at the current level, a
+`level` switch re-teaches once and subsequent follow-ups adopt the new level, a
+bad level name is rejected without re-teaching, and blank / `done` / EOF / Ctrl-C
+each exit gracefully. Then verified live on Swerve — highlighted a function, got
+the lesson, asked 2–3 follow-ups that stayed on the selection and pulled in
+off-screen repo context, and exited cleanly with no second capture.
+
+Still out of scope and untouched, as specified: the judge / verdict schema and
+any verification (Step 4), and memory writing — `look` still records nothing to
+`learning_state.json` (it only reads the level); recording remains the logged
+Step 5 thread.
+
 ## 2026-06-15 — Phase 3, Step 3.5: make `look` repo-aware (fuse screen + retrieval)
 
 `look` no longer teaches from the screen alone. After it captures the highlighted

@@ -278,6 +278,30 @@ SELECTION_READ_SYSTEM_PROMPT = (
     f"reply with exactly {NO_SELECTION_SENTINEL} and nothing else."
 )
 
+# The screen twin of FOLLOWUP_SYSTEM_PROMPT: the learner has been taught the
+# highlighted selection (from the screenshot + retrieved repo chunks) and now
+# wants to drill into it. Answered against the SAME evidence already in hand —
+# never a new capture — so it stays anchored to that one selection.
+SCREEN_FOLLOWUP_SYSTEM_PROMPT = (
+    "You are a patient expert coding tutor sitting beside a learner, looking over "
+    "their shoulder at their editor. You already taught them the HIGHLIGHTED "
+    "selection in the screenshot (shown by a colored selection background), and "
+    "now they have a follow-up question about it. Answer it in the same context — "
+    "no new screenshot is taken, so reason from the selection you can see, the "
+    "rest of the visible file, the lesson so far, and any related repo excerpts "
+    "you were given.\n\n"
+    "Rules:\n"
+    "- Stay scoped to the highlighted selection. A follow-up may go DEEPER on the "
+    "selection or on how it connects to the related excerpts, but do NOT drift "
+    "into touring the whole file.\n"
+    "- Ground every claim in what you can actually see in the screenshot and in "
+    "the provided excerpts; cite the relevant `path:start-end` key(s) where they "
+    "apply. If something isn't visible or in the excerpts, say so plainly rather "
+    "than inventing it.\n"
+    "- Answer just what they asked, then stop. Be warm and direct; don't re-teach "
+    "the whole lesson, and never quiz or grade them."
+)
+
 FOLLOWUP_SYSTEM_PROMPT = (
     "You are a patient expert coding tutor. The learner is in the middle of a "
     "lesson about one thread of a codebase and has a follow-up question — e.g. "
@@ -600,6 +624,43 @@ def teach_from_screen(
     )
 
 
+def answer_screen_followup(
+    question: str,
+    frame: "capture.Frame",
+    hits: list[Hit],
+    lesson: str,
+    level: str = DEFAULT_LEVEL,
+    model: str = TEACH_MODEL,
+) -> str:
+    """Answer a follow-up about the highlighted selection, at `level`.
+
+    The screen-aware twin of `answer_followup`: the evidence is the SAME
+    screenshot (the highlighted selection, visually), the repo `hits` pulled at
+    capture time, and the `lesson` so far — never a fresh capture. This is what
+    makes `look` a back-and-forth: highlight once, then keep questioning that one
+    selection with the context already loaded. Stays scoped to the selection.
+    Raises ValueError on an unknown level or a missing API key.
+    """
+    _check_level(level)
+    context_note = ""
+    if hits:
+        context_note = (
+            "\n\nThe related repo excerpts already in hand (off-screen context, "
+            f"cite by `path:start-end`):\n\n{build_context(hits)}"
+        )
+    instruction = (
+        "This is the screenshot of my editor from the lesson — the HIGHLIGHTED "
+        "selection is what we're discussing.\n\n"
+        f"The lesson so far:\n{lesson}\n\n"
+        f'My follow-up question: "{question}"\n\n'
+        "Answer it grounded in the highlighted selection and the context already "
+        "in hand, at my level, staying scoped to the selection." + context_note
+    )
+    content = [capture.image_block(frame), {"type": "text", "text": instruction}]
+    system = f"{SCREEN_FOLLOWUP_SYSTEM_PROMPT}\n\n{_level_block(level)}"
+    return _ask_model(system, content, MAX_FOLLOWUP_TOKENS, model)
+
+
 def answer_followup(
     question: str,
     hits: list[Hit],
@@ -891,6 +952,62 @@ def _run_followups(
         print("\n" + answer_followup(line, hits, teaching, level=level, model=model))
 
     return teaching, level, asked
+
+
+def _run_screen_followups(
+    frame: "capture.Frame",
+    hits: list[Hit],
+    lesson: str,
+    level: str,
+    prior: str,
+    model: str,
+    input_fn,
+) -> None:
+    """Let the learner question the highlighted selection until they're done.
+
+    The screen twin of `_run_followups`: every follow-up is answered against the
+    SAME `frame` + repo `hits` already in hand (`answer_screen_followup`) — the
+    selection is never re-captured. Typing `level <tier>` re-teaches the same
+    selection from the same screenshot at a new altitude; a blank line, 'done',
+    EOF, or Ctrl-C exits cleanly. `look` records nothing, so there's no
+    engagement signal or final level to return — the loop just runs and ends.
+    """
+    print("\n" + "-" * 60)
+    print(f"You're learning at the '{level}' level.")
+    print('Ask a follow-up about the highlighted code ("what does X do?", "why this way?"),')
+    print(f"type 'level {'|'.join(LEVELS)}' to re-pitch it,")
+    print("or press Enter / type 'done' to move on.")
+
+    while True:
+        try:
+            line = input_fn("\n> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()  # land the cursor on a fresh line after ^C / EOF
+            break
+        if line == "" or line.lower() in {"done", "exit", "quit"}:
+            break
+
+        if line.lower().startswith("level"):
+            parts = line.split()
+            new_level = parts[1].lower() if len(parts) > 1 else ""
+            if new_level not in LEVEL_GUIDANCE:
+                print(f"Pick a level: {', '.join(LEVELS)}.")
+            elif new_level == level:
+                print(f"(Already learning at the '{level}' level.)")
+            else:
+                level = new_level
+                print(f"\nRe-teaching the selection at the '{level}' level.")
+                print("-" * 60)
+                lesson = teach_from_screen(
+                    frame, hits=hits, level=level, prior=prior, model=model,
+                )
+                print(lesson)
+            continue
+
+        print(
+            "\n"
+            + answer_screen_followup(line, frame, hits, lesson, level=level, model=model)
+        )
 
 
 def _run_comprehension(
@@ -1224,10 +1341,14 @@ def look(
     from the ingested repo (`_related_chunks`), and teaches the selection grounded
     in BOTH the screenshot and that off-screen context, citing `path:start-end`
     keys (`teach_from_screen`). With no repo ingested it falls back to screen-only
-    teaching with a clear note. Returns the lesson text — or None if the capture
-    failed (permission or no window), having printed a human message. The level is
-    read from `state_path` for consistency with `explore`; nothing is written (a
-    screenshot lesson has no chunk citations to record as a thread).
+    teaching with a clear note. After the first lesson it opens a follow-up loop
+    (`_run_screen_followups`) so the learner can question that same selection in a
+    back-and-forth — every follow-up reuses the one screenshot + the chunks pulled
+    at capture time, never a fresh capture — until they exit. Returns the initial
+    lesson text — or None if the capture failed (permission or no window), having
+    printed a human message. The level is read from `state_path` for consistency
+    with `explore`; nothing is written (a screenshot lesson has no chunk citations
+    to record as a thread).
     """
     state = learning.load_state(state_path)
     level = level or state.level or DEFAULT_LEVEL
@@ -1255,6 +1376,15 @@ def look(
             lesson = teach_from_screen(
                 frame, hits=hits, level=level, prior=prior, model=model,
             )
+            print("\n" + "-" * 60)
+            print(lesson)
+
+            # The selection is captured ONCE; now turn the lesson into a
+            # back-and-forth. Every follow-up reuses this same frame + hits with
+            # no re-capture — which is exactly why the loop runs INSIDE
+            # `captured_frame`: `image_block` re-reads the PNG on each question,
+            # so the file must stay on disk until the learner is done.
+            _run_screen_followups(frame, hits, lesson, level, prior, model, input_fn)
     except capture.PermissionDeniedError as exc:
         print(f"\n{exc}", file=sys.stderr)
         return None
@@ -1262,8 +1392,6 @@ def look(
         print(f"error: {exc}", file=sys.stderr)
         return None
 
-    print("\n" + "-" * 60)
-    print(lesson)
     return lesson
 
 
