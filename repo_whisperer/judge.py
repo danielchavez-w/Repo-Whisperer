@@ -5,12 +5,14 @@ evidence gathered for it, return a structured, honestly-calibrated verdict —
 does the evidence actually answer the question, only partly, not at all, or is
 it too unclear to tell?
 
-The verdict schema is deliberately generic so it stays **stable** as later steps
-swap the evidence from retrieved TEXT (relevance — this step) to a SCREENSHOT
-(Phase 3 verification). Only the rubric framing changes per use; the `Verdict`
-shape does not. That's the whole point of building it here first: prove the
-honest-verdict contract on the easy text case, then have screen verification
-reuse the exact same schema with image evidence.
+The verdict schema is deliberately generic so it stays **stable** as the
+evidence changes per use. Only the rubric framing changes; the `Verdict` shape
+does not. Two uses so far, both text evidence: `judge_relevance` (did retrieval
+actually answer the learner's question — Step 1) and `judge_attempt` (does the
+learner's practice-file code, read from disk, demonstrate the thing they were
+practicing — Step 4's `check`). The evidence-agnostic core (`_run_judge` takes
+message content, which could carry an image block) keeps a future screenshot
+use possible without touching the schema.
 
 This step's concrete use is **model-judged relevance**. Retrieval always returns
 its top-k, even when the repo has nothing on the topic, so a cosine distance
@@ -133,6 +135,35 @@ RELEVANCE_SYSTEM_PROMPT = (
 )
 
 
+ATTEMPT_SYSTEM_PROMPT = (
+    "You are a fair judge for a coding tutor. A learner was taught a thread of a "
+    "real codebase and then wrote their own PRACTICE ATTEMPT of the idea in a "
+    "scratch file. Judge honestly whether the attempt demonstrates a working "
+    "grasp of the thing they were practicing.\n\n"
+    "For this judgment the QUESTION is 'does the attempt demonstrate the thing "
+    "they were practicing?' and the EVIDENCE is the attempt code itself, read "
+    "straight from disk — plus excerpts from the real codebase for comparison, "
+    "when provided.\n\n"
+    "Judge the MECHANISM, not the polish:\n"
+    "- A practice attempt legitimately simplifies: different names, fewer "
+    "features, hardcoded values, no error handling. None of that lowers the "
+    "verdict when the core mechanism is right.\n"
+    "- 'answers' = the core mechanism of the practiced thing is present and "
+    "would work.\n"
+    "- 'partial' = the attempt is clearly going for the right thing and gets "
+    "some of it, but a material piece of the mechanism is missing or wrong — "
+    "name that piece in 'missing'.\n"
+    "- 'doesnt_answer' = the attempt does not do the practiced thing, under any "
+    "naming or simplification.\n"
+    "- 'cant_tell' = the attempt is too fragmentary or unclear to judge either "
+    "way — not a hedge when you can actually reason it out.\n"
+    "- The real-codebase excerpts show what the mechanism actually requires; "
+    "compare against them, but never demand the attempt mirror the real code "
+    "line-for-line.\n\n"
+    f"{VERDICT_SCHEMA_NOTE}"
+)
+
+
 def _coerce(value: object, allowed: tuple[str, ...], default: str) -> str:
     """Return `value` if it's an allowed string, else the safe `default`."""
     return value if isinstance(value, str) and value in allowed else default
@@ -230,6 +261,42 @@ def judge_relevance(
         f"Judge honestly whether these excerpts actually answer the question."
     )
     return _run_judge(RELEVANCE_SYSTEM_PROMPT, content, model)
+
+
+def judge_attempt(
+    goal: str,
+    attempt: str,
+    hits: list[Hit],
+    filename: str = "",
+    model: str = JUDGE_MODEL,
+) -> Verdict:
+    """Judge whether a learner's practice `attempt` demonstrates `goal`.
+
+    The application-verification use of the shared judge (Phase 3, Step 4).
+    `goal` describes what the learner was practicing (the most recently taught
+    thread, or a note to infer it from the code when no lesson is recorded);
+    `attempt` is their practice-file code read from disk — the disk-for-truth
+    rule, never a screenshot. `hits`, when non-empty, are excerpts from the real
+    codebase so the judge can see what the mechanism actually requires. Unlike
+    `judge_relevance`, empty `hits` do NOT short-circuit — the attempt itself is
+    the evidence and can be judged without comparison excerpts. The verdict is
+    a PRIVATE signal for the tutor to translate into assistance; it is never
+    shown to the learner as a grade. Raises ValueError if the API key is missing.
+    """
+    comparison = (
+        f"Excerpts from the real codebase, for comparison:\n\n{build_context(hits)}"
+        if hits
+        else "(No real-codebase excerpts available — judge from the attempt alone.)"
+    )
+    file_note = f" (file `{filename}`)" if filename else ""
+    content = (
+        f"The learner was practicing: {goal}\n\n"
+        f"Their practice attempt, read from disk{file_note}:\n\n{attempt}\n\n"
+        f"{comparison}\n\n"
+        f"Judge honestly whether the attempt demonstrates a working grasp of "
+        f"what they were practicing."
+    )
+    return _run_judge(ATTEMPT_SYSTEM_PROMPT, content, model)
 
 
 def _main(argv: list[str]) -> int:

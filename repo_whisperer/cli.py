@@ -6,6 +6,7 @@ Ties the engine together into the commands the learner uses:
     python -m repo_whisperer ask "<question>"          # grounded, cited answer
     python -m repo_whisperer explore "<where is X>"    # show code + offer to teach
     python -m repo_whisperer look                      # teach the code you highlight
+    python -m repo_whisperer check <practice-file>     # help with code you wrote
 
 `ingest` walks → chunks → embeds → stores a repo (rebuilding the collection);
 `ask` retrieves the most relevant chunks and prints a grounded, cited answer
@@ -13,9 +14,12 @@ Ties the engine together into the commands the learner uses:
 offers to teach it, teaches at the learner's level, and afterwards suggests
 related unexplored threads to keep the session going. `look` (Phase 3) gives the
 tutor sight: it takes one announced screenshot of your editor and teaches the
-code you've highlighted, using the rest of the visible file as context. `ask`,
-`explore`, and `look` default to the `chroma_db/` store, so a typical session is
-one `ingest` followed by as many of them as you like.
+code you've highlighted, using the rest of the visible file as context. `check`
+(Phase 3) completes teach → verify: after learning a pattern, write your own
+version in a practice file and `check` re-reads it from disk and helps you close
+the gap — grounded in the real repo, never a grade. `ask`, `explore`, `look`,
+and `check` default to the `chroma_db/` store, so a typical session is one
+`ingest` followed by as many of them as you like.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ from repo_whisperer.store import (
     DEFAULT_WINDOW,
     ingest_repo,
 )
-from repo_whisperer.tutor import LEVELS, explore, look
+from repo_whisperer.tutor import LEVELS, check, explore, look
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
@@ -98,6 +102,17 @@ def _cmd_look(args: argparse.Namespace) -> int:
         keep=args.keep,
     )
     return 0 if teaching is not None else 1
+
+
+def _cmd_check(args: argparse.Namespace) -> int:
+    assistance = check(
+        args.file,
+        level=args.level,
+        k=args.top_k,
+        db_dir=args.db,
+        state_path=args.state,
+    )
+    return 0 if assistance is not None else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -220,6 +235,38 @@ def main(argv: list[str] | None = None) -> int:
         help=f"learning-state file (default: {DEFAULT_STATE_PATH})",
     )
     p_look.set_defaults(func=_cmd_look)
+
+    p_check = sub.add_parser(
+        "check", help="have the tutor look at code you wrote and help you close the gap",
+        description=(
+            "Phase 3 verification, assist-first: after learning a pattern "
+            "(via `explore` or `look`), write your own version in a practice "
+            "file, then run `check <file>`. The tutor re-reads your file "
+            "straight from disk (no screenshot), works out what you were going "
+            "for — assuming your most recent lesson, and saying so — and helps "
+            "you close the gap at your level, comparing against how the real "
+            "codebase does it with `path:start-end` citations. Assistance, "
+            "never a grade."
+        ),
+    )
+    p_check.add_argument("file", help="path to the practice file you wrote")
+    p_check.add_argument(
+        "--db", default=DEFAULT_DB_DIR, metavar="DIR",
+        help=f"ChromaDB store to compare against (default: {DEFAULT_DB_DIR})",
+    )
+    p_check.add_argument(
+        "-k", "--top-k", type=int, default=DEFAULT_TOP_K, dest="top_k",
+        help=f"related chunks to retrieve for comparison (default: {DEFAULT_TOP_K})",
+    )
+    p_check.add_argument(
+        "--level", choices=LEVELS, default=None,
+        help="teaching altitude (default: your saved level, else beginner)",
+    )
+    p_check.add_argument(
+        "--state", default=DEFAULT_STATE_PATH, metavar="FILE",
+        help=f"learning-state file (default: {DEFAULT_STATE_PATH})",
+    )
+    p_check.set_defaults(func=_cmd_check)
 
     args = parser.parse_args(argv)
 

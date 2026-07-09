@@ -13,7 +13,10 @@ It is built in three phases:
 - **Phase 3 (in progress):** Screen-aware tutoring via the vision API. The tutor
   can now *see* your editor: highlight any code and it teaches that selection,
   grounding the lesson in both the screenshot and the rest of the ingested repo
-  (`look`). Screen-aware verification (a `check` command) is the next step.
+  (`look`). And the teach → verify arc is closed: write your own version of a
+  pattern in a practice file and `check` helps you get it right — assistance,
+  never a grade. Next: closing the loop into the learning memory (mastery,
+  refreshers).
 
 ## What it does
 
@@ -31,6 +34,10 @@ A CLI tool that:
    your editor and teaches the code you've **highlighted** — grounded in both the
    screenshot (your exact selection) and related chunks pulled from the ingested
    repo, so the lesson can reach off-screen context with citations (`look`).
+6. **Helps with code you wrote** (Phase 3): after learning a pattern, write your
+   own version in a practice file and run `check <file>` — the tutor re-reads it
+   from disk, works out what you were going for, and helps you close the gap at
+   your level, comparing against how the real codebase does it (`check`).
 
 Embeddings run locally (`sentence-transformers`, `all-MiniLM-L6-v2`), so only the
 answering, teaching, and screen-reading calls hit the Anthropic API.
@@ -82,6 +89,9 @@ python -m repo_whisperer explore "how do the collectibles work?"
 
 # 2c. Highlight code in your editor, then have it taught (Phase 3, macOS)
 python -m repo_whisperer look
+
+# 2d. Write your own version of a pattern, then get help with it (Phase 3)
+python -m repo_whisperer check practice.js
 ```
 
 The store holds **one repo at a time** — re-running `ingest` rebuilds the
@@ -150,6 +160,34 @@ python -m repo_whisperer look
 If nothing is clearly highlighted, it asks you to highlight the part you want
 rather than dumping the whole file.
 
+### `check` — get help with code you wrote (Phase 3)
+
+`check` completes the teach → verify arc — assist-first. Learn a pattern (via
+`explore` or `look`), open a practice file, try writing your own version, then:
+
+```bash
+python -m repo_whisperer check practice.js
+```
+
+1. **You name the file; disk is the truth.** It re-reads your practice file
+   straight from disk — no screenshot, no capture, no guessing which file.
+2. **It works out what you were going for** — assuming your most recent lesson,
+   and announcing that assumption (with no lessons recorded it infers the
+   pattern from your code itself).
+3. **It assists, never grades.** No verdict, score, or pass/fail — it starts
+   from what your attempt already gets right, then helps close the gap: what's
+   missing and *why* it matters, pitched at your saved level. An honest
+   structured judgment runs underneath to locate where your understanding is,
+   but what you see is help, not a report card.
+4. **Grounded in the real repo.** Your attempt is used to retrieve how the
+   actual codebase solves the same thing, so the help compares against the real
+   code with `path:start-end` citations. Practice-style simplifications
+   (different names, hardcoded values) are respected — only differences that
+   touch the core mechanism come up.
+
+An empty or wrong file gets a friendly note, not a crash. Tweak the file and run
+`check` again as many times as you like.
+
 Options:
 
 - `ingest`: `--db DIR` (store location), `--window N` / `--overlap M` (chunking),
@@ -162,3 +200,5 @@ Options:
   screen instead of the active window), `--window ID` (pin an exact window),
   `--exclude APP` (skip an app when picking the window), `--keep` (keep the
   screenshot file).
+- `check`: `--db DIR`, `-k N` (chunks to retrieve for comparison), `--level
+  beginner|intermediate|advanced`, `--state FILE`.

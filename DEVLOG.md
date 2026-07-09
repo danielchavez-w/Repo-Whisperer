@@ -1,5 +1,65 @@
 # Development Log
 
+## 2026-07-09 — Step 4: the `check` command — assist-oriented verification, disk-only
+
+Phase 3's arc completes: everything before this teaches; `check` looks at code
+the **learner** wrote and helps them get it right. The reframe that shaped the
+whole step: **assist, not grade.** `check` is the tutor helping with what the
+learner was trying to do — "you've got the structure, here's what's missing and
+why" — never a proctor with a report card. The judge schema still runs
+underneath (that's how the tutor locates where the understanding is), but its
+verdict is a **private signal**, translated into patient gap-closing help; the
+learner never sees a verdict, score, or pass/fail.
+
+The v1 flow, lean and explicit:
+
+- **The learner names the file:** `check <practice-file>`. No inference, no
+  guessing.
+- **Disk-for-truth:** the file is re-read straight from disk. No capture, no
+  vision call anywhere in `check` — naming the file already carries the intent
+  signal a screenshot would have provided.
+- **What they were going for** defaults to the most recently taught thread in
+  `learning_state.json` (by timestamp — re-teaching refreshes a record in
+  place, so list order alone isn't recency), and the assumption is announced.
+  With no lessons recorded, the tutor infers the pattern from the code itself.
+- **Grounded in the real repo:** the attempt's own text is the retrieval query
+  through the existing `answer.retrieve(...)`, so the help compares against how
+  the actual codebase solves the same thing, cited `path:start-end` like
+  `explore`. Same graceful fallback as `look` when nothing is ingested — the
+  attempt alone is still judgeable evidence, just without comparisons.
+- **The Step 1 judge finally lands its second use:** new
+  `judge.judge_attempt(goal, attempt, hits)` reuses the SAME `Verdict` schema
+  and `VERDICT_SCHEMA_NOTE` — no fork — with a new rubric
+  (`ATTEMPT_SYSTEM_PROMPT`) that judges the MECHANISM, not the polish: a
+  practice attempt legitimately simplifies (different names, hardcoded values,
+  no error handling), and none of that lowers the verdict when the core
+  mechanism is right. Unlike `judge_relevance`, empty hits don't short-circuit.
+- **Levels reused exactly:** the saved level from `learning_state.json` pitches
+  the assistance (`assist_with_attempt` composes `CHECK_ASSIST_SYSTEM_PROMPT` +
+  the same `_level_block`), overridable with `--level` like everywhere else.
+- **Wrong files never crash:** missing path, directory, unreadable/binary, and
+  empty files each get a plain human message (`_read_attempt`); an empty file
+  gets a friendly "write your attempt, then run `check` again", not an error
+  trace. Oversized files are truncated with a note (`MAX_ATTEMPT_CHARS`).
+
+Verified live against the ingested Swerve repo: a simplified collectible-spawner
+attempt (correct probabilistic gate, missing the dot-trail loop and safe-lane
+placement) got assistance that opened with what the attempt got right, closed
+the two real gaps with `js/collectibles.js:170-190` / `main.js:145-152`
+citations, explicitly declined to demand `getSafeLane` in a practice file, and
+never used grade language.
+
+**Noted for later (out of v1 scope, per the step spec):**
+
+- **Screenshot-based intent** could return as an enhancement — capture to see
+  *which* file/editor the learner is working in — but naming the file replaced
+  it cleanly for v1.
+- **Practice-file inference** (finding the attempt without being told) is a
+  possible later convenience.
+- **Memory writing is still the Step 5 thread:** `check` reads the level and
+  the latest thread but records nothing — routing shaky verdicts into
+  `find_revisit`/refresher machinery and the `mastery` field is next.
+
 ## 2026-06-19 — Make `look` interactive: follow-up Q&A on the highlighted selection
 
 `look` was one-shot — capture the highlight, teach it, stop. Now the lesson opens

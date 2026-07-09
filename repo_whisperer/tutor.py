@@ -43,6 +43,7 @@ import argparse
 import re
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from repo_whisperer import capture, judge, learning
 from repo_whisperer.answer import (
@@ -77,6 +78,11 @@ MAX_EVAL_TOKENS: int = 600
 
 # "What's next" nudges are a handful of one-line invitations.
 MAX_NUDGE_TOKENS: int = 400
+
+# Guard on `check`: a practice file is a handful of functions, so anything past
+# this is almost certainly the wrong file (a bundle, a log). Truncating keeps
+# the prompt sane while still letting an honest attempt through with a note.
+MAX_ATTEMPT_CHARS: int = 20_000
 
 # At most this many next-thread suggestions per nudge.
 MAX_NUDGES: int = 3
@@ -300,6 +306,50 @@ SCREEN_FOLLOWUP_SYSTEM_PROMPT = (
     "than inventing it.\n"
     "- Answer just what they asked, then stop. Be warm and direct; don't re-teach "
     "the whole lesson, and never quiz or grade them."
+)
+
+# Step 4 — the `check` command's voice. The learner wrote their own practice
+# attempt and asked the tutor to look at it. The judge's verdict runs underneath
+# as a PRIVATE signal locating where their understanding is; what the learner
+# sees is gap-closing assistance in the same patient voice as `explore`/`look` —
+# never a grade, score, or report card.
+CHECK_ASSIST_SYSTEM_PROMPT = (
+    "You are a patient expert coding tutor. A learner was taught a thread of a "
+    "real codebase and then tried writing their own version of the idea in a "
+    "practice file. They've asked you to look at what they wrote and help them "
+    "get it right. Your job is to ASSIST them in what they were trying to do — "
+    "close the gap between their attempt and a working grasp — never to grade "
+    "them.\n\n"
+    "You are given: their practice-file code (read straight from disk — this is "
+    "exactly what they wrote), what they were practicing, related excerpts from "
+    "the REAL codebase labeled with `path:start-end` keys, and a PRIVATE honest "
+    "assessment from a reviewing pass.\n\n"
+    "Rules:\n"
+    "- Assist, don't grade. NEVER show or mention the private assessment, a "
+    "verdict, a score, pass/fail, or rubric words like 'partial' or "
+    "'incorrect'. It exists only to tell you where their understanding is; "
+    "translate it into help.\n"
+    "- Start from what their attempt already gets right — be specific, naming "
+    "the real identifiers they wrote.\n"
+    "- Then close the gap: what's missing or off, and WHY it matters for the "
+    "mechanism — explained as help toward what they were going for, not marked "
+    "wrong.\n"
+    "- Ground the help in how the real codebase does it: compare their attempt "
+    "against the excerpts and cite the `path:start-end` keys (e.g. \"the real "
+    "`createDot` also registers it for collision — see `dots.js:12-30`\"). "
+    "Never invent code or behavior the excerpts don't show.\n"
+    "- A practice attempt legitimately simplifies — different names, hardcoded "
+    "values, fewer features are fine. Only surface a difference when it "
+    "touches the core mechanism they were practicing.\n"
+    "- If the attempt is genuinely solid, say so plainly and offer at most one "
+    "real refinement. Do NOT manufacture a gap just to sound useful.\n"
+    "- If you genuinely can't tell what they were going for (or the private "
+    "assessment says it can't), say so warmly and ask them what they were "
+    "trying to build, rather than bluffing.\n"
+    "- Stay scoped to what they were practicing; don't sprawl into a "
+    "whole-repo lesson.\n"
+    "- Be warm and concrete — a few focused paragraphs — and end by pointing at "
+    "the most useful next thing to try in their file."
 )
 
 FOLLOWUP_SYSTEM_PROMPT = (
@@ -1393,6 +1443,173 @@ def look(
         return None
 
     return lesson
+
+
+def assist_with_attempt(
+    goal: str,
+    attempt: str,
+    verdict: "judge.Verdict",
+    hits: list[Hit],
+    filename: str = "",
+    level: str = DEFAULT_LEVEL,
+    model: str = TEACH_MODEL,
+) -> str:
+    """Help the learner close the gap in their practice `attempt`, at `level`.
+
+    The visible half of `check`: the judge's `verdict` is passed in as a PRIVATE
+    signal — it locates where the learner's understanding is, and this call
+    translates it into patient, gap-closing assistance grounded in the real
+    codebase (`hits`, cited by `path:start-end`). The learner never sees the
+    verdict itself. Raises ValueError on an unknown level or a missing API key.
+    """
+    _check_level(level)
+    comparison = (
+        f"Related excerpts from the REAL codebase (cite by `path:start-end`):"
+        f"\n\n{build_context(hits)}"
+        if hits
+        else "(No real-codebase excerpts available for comparison.)"
+    )
+    private = (
+        f"PRIVATE assessment of the attempt — for your eyes only, never to be "
+        f"shown or mentioned:\n"
+        f"- verdict: {verdict.verdict} (confidence: {verdict.confidence})\n"
+        f"- reason: {verdict.reason}\n"
+        f"- missing: {verdict.missing or '(nothing — the attempt demonstrates it)'}"
+    )
+    file_note = f" (their file `{filename}`)" if filename else ""
+    user_message = (
+        f"The learner was practicing: {goal}\n\n"
+        f"Their practice attempt, read from disk{file_note}:\n\n{attempt}\n\n"
+        f"{comparison}\n\n"
+        f"{private}\n\n"
+        f"Now assist them: help them close the gap between this attempt and "
+        f"what they were going for, at their level."
+    )
+    system = f"{CHECK_ASSIST_SYSTEM_PROMPT}\n\n{_level_block(level)}"
+    return _ask_model(
+        system, user_message, MAX_TEACH_TOKENS, model,
+        max_continuations=MAX_TEACH_CONTINUATIONS,
+    )
+
+
+def _read_attempt(file: str) -> str | None:
+    """Read the learner's practice file from disk, or None with a human message.
+
+    The disk-for-truth rule: what gets judged and assisted is exactly what's in
+    the file, never a screenshot of it. Every wrong-file case (missing, a
+    directory, binary, empty) gets a plain explanation instead of a traceback —
+    naming the wrong file must never feel like a crash.
+    """
+    path = Path(file)
+    if path.is_dir():
+        print(f"error: {file} is a directory — point `check` at the practice "
+              f"file you wrote.", file=sys.stderr)
+        return None
+    if not path.exists():
+        print(f"error: {file} doesn't exist. Point `check` at the practice "
+              f"file you wrote (the path is relative to where you run this).",
+              file=sys.stderr)
+        return None
+    try:
+        attempt = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"error: {file} doesn't look like a text file, so there's no "
+              f"code to read in it.", file=sys.stderr)
+        return None
+    except OSError as exc:
+        print(f"error: couldn't read {file}: {exc}", file=sys.stderr)
+        return None
+    if not attempt.strip():
+        print(f"{file} is empty so far — write your attempt in it, then run "
+              f"`check` again and I'll take a look.")
+        return None
+    if len(attempt) > MAX_ATTEMPT_CHARS:
+        print(f"(That file is big for a practice attempt — reading just the "
+              f"first {MAX_ATTEMPT_CHARS:,} characters.)")
+        attempt = attempt[:MAX_ATTEMPT_CHARS] + "\n… (truncated)"
+    return attempt
+
+
+def check(
+    file: str,
+    level: str | None = None,
+    k: int = DEFAULT_TOP_K,
+    db_dir: str = "chroma_db",
+    model: str = TEACH_MODEL,
+    state_path: str | None = DEFAULT_STATE_PATH,
+) -> str | None:
+    """Look at code the learner wrote and help them get it right (Step 4).
+
+    The verification path that completes teach → verify — pointed assist-first:
+    the learner names their practice file, `check` re-reads it straight from
+    disk (never a screenshot), works out what they were going for, and helps
+    them close the gap at their level. Underneath, `judge.judge_attempt` runs
+    the attempt through the shared verdict schema to locate where their
+    understanding is; that verdict stays PRIVATE — what prints is patient
+    assistance, never a grade.
+
+    What they were practicing defaults to the most recently taught thread in
+    the learning state, announced as an assumption; with no lessons recorded it
+    is inferred from the attempt itself. The attempt's own text is the retrieval
+    query into the ingested store, so the help can cite how the real code does
+    it (`path:start-end`), with the same graceful screen-only-style fallback as
+    `look` when nothing is ingested. Reads the saved level; writes nothing —
+    recording results into the learning memory is Step 5. Returns the assistance
+    text, or None when the file couldn't be read (having printed why).
+    """
+    state = learning.load_state(state_path)
+    level = level or state.level or DEFAULT_LEVEL
+    _check_level(level)
+
+    attempt = _read_attempt(file)
+    if attempt is None:
+        return None
+
+    # The reference for "what were they going for": the most recently taught
+    # thread (by timestamp — re-teaching refreshes a record in place, so list
+    # order alone isn't recency). Announced, since it's an assumption.
+    thread = max(state.threads, key=lambda t: t.timestamp) if state.threads else None
+    if thread is not None:
+        goal = (
+            f'the thread they most recently learned: "{thread.topic}" '
+            f'(their original question: "{thread.query}")'
+        )
+        print(f'🔎 Checking {file} against your latest lesson: "{thread.topic}"')
+        print("   (assuming that's what you're practicing — reading the file "
+              "fresh from disk)")
+    else:
+        goal = (
+            "no lesson is recorded, so infer from the attempt itself what "
+            "pattern they appear to be practicing"
+        )
+        print(f"🔎 Checking {file} — no lessons recorded yet, so I'll work out "
+              f"what you're going for from the code itself.")
+
+    # The attempt is its own retrieval query: pull how the real repo does the
+    # same thing, so the help can compare and cite. Degrades cleanly when
+    # nothing is ingested — the attempt alone is still judgeable evidence.
+    try:
+        hits = retrieve(attempt, k=k, db_dir=db_dir)
+    except ValueError:
+        hits = []
+        print("No ingested repo found, so I can't compare against the real "
+              "code — run `python -m repo_whisperer ingest <path-to-repo>` "
+              "for grounded, cited help.")
+    if hits:
+        plural = "chunk" if len(hits) == 1 else "chunks"
+        print(f"Pulled {len(hits)} related {plural} from the real repo to "
+              f"compare against.")
+
+    print("Looking at what you were going for…")
+    verdict = judge.judge_attempt(goal, attempt, hits, filename=file, model=model)
+    assistance = assist_with_attempt(
+        goal, attempt, verdict, hits, filename=file, level=level, model=model,
+    )
+    print("\n" + "-" * 60)
+    print(assistance)
+    print("\n" + "-" * 60)
+    print(f"Tweak the file and run `check {file}` again whenever you're ready.")
+    return assistance
 
 
 def _main(argv: list[str]) -> int:
