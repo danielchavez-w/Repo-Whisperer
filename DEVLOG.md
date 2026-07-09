@@ -1,5 +1,51 @@
 # Development Log
 
+## 2026-07-09 — Interlude: the `guide` command — side questions with the whole repo in view
+
+An out-of-arc feature, learner-requested: every tutoring command so far works
+**one thread at a time** (`explore` a query, `look` at a highlight, `check` a
+file), so there was no way to ask the tutor a question that needs the whole
+repo in view — "which file should I learn first for my level?", "what is this
+project, big picture?". The post-lesson nudges gesture at this but are
+tutor-initiated and neighbor-of-the-last-lesson only; `ask` retrieves per-query
+chunks, which for a learning-path question is scattershot. `guide` is the
+learner-initiated side-question channel.
+
+The design:
+
+- **`guide "<question>"`** (no argument → the default "where should I start,
+  and which file should I learn first for my level?").
+- **The bird's-eye view is new evidence:** `answer.repo_map(db_dir)` reads the
+  collection's metadata into a per-file map — path, line count (highest chunk
+  end line), chunk count. This is the one prompt that gets handed the ENTIRE
+  file list, capped at `MAX_MAP_FILES` (largest files kept, remainder counted)
+  so a big repo can't blow the prompt up. Opening the collection was factored
+  into `answer._collection`, shared with `retrieve`, so "nothing ingested"
+  reads the same everywhere.
+- **Still grounded:** excerpts are retrieved for the question as usual, and the
+  prompt draws a hard line — the map says what exists and how big it is, NOT
+  what code does; behavior claims must cite `path:start-end` from the
+  excerpts, and reasoning from a filename must be flagged as a guess. Only
+  real files from the map may be named.
+- **Level- and history-fitted:** the saved level pitches the advice (beginner →
+  the small, self-contained entry point; advanced → straight at the core) and
+  the covered-threads brief steers recommendations to build on past lessons
+  rather than repeat them. Reads the state; writes nothing.
+- **Ends in motion:** the answer closes with a ready-to-run `explore "<topic>"`
+  query, so advice turns directly into a lesson.
+
+Verified live on Swerve (fresh learning state): the beginner question got
+pointed at `js/difficulty.js` (41 lines) with an explicit warning away from
+`js/main.js` (459 lines, all imports), citations into `CLAUDE.md`/`README.md`,
+a flagged filename-inference, and a runnable `explore` query. One prompt fix
+out of the first live run: the model invented a `look js/difficulty.js`
+syntax, so the prompt now describes `look` correctly (no file argument —
+highlight in the editor, run plain `look`).
+
+Also this session (not part of the feature): reset `learning_state.json` to a
+fresh slate for new teaching — threads cleared, level and the Swerve repo
+binding kept.
+
 ## 2026-07-09 — Step 4: the `check` command — assist-oriented verification, disk-only
 
 Phase 3's arc completes: everything before this teaches; `check` looks at code

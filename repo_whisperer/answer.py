@@ -57,11 +57,11 @@ class Hit:
     distance: float  # cosine distance (lower = more similar)
 
 
-def retrieve(question: str, k: int = DEFAULT_TOP_K, db_dir: str = "chroma_db") -> list[Hit]:
-    """Embed `question` and return the top-`k` most similar stored chunks.
+def _collection(db_dir: str = "chroma_db"):
+    """Open the ingested collection, raising a helpful ValueError when absent.
 
-    Raises ValueError with a helpful message if the collection hasn't been
-    built yet (i.e. nothing has been ingested).
+    Shared by `retrieve` and `repo_map` so "nothing has been ingested yet" reads
+    the same everywhere.
     """
     client = get_client(db_dir)
     try:
@@ -71,12 +71,39 @@ def retrieve(question: str, k: int = DEFAULT_TOP_K, db_dir: str = "chroma_db") -
             f"No ingested repo found in '{db_dir}'. Run "
             f"`python -m repo_whisperer.store <path-to-repo>` first."
         ) from exc
-
-    count = collection.count()
-    if count == 0:
+    if collection.count() == 0:
         raise ValueError(
             f"The collection in '{db_dir}' is empty. Re-ingest a repo first."
         )
+    return collection
+
+
+def repo_map(db_dir: str = "chroma_db") -> list[tuple[str, int, int]]:
+    """Every file in the ingested store, as (path, line_count, chunk_count).
+
+    The bird's-eye view the chunk-level retrieval can't give: which files exist
+    and roughly how big each is (line count = the highest chunk end line seen).
+    Sorted by path for stable output. Raises ValueError when nothing has been
+    ingested.
+    """
+    collection = _collection(db_dir)
+    res = collection.get(include=["metadatas"])
+    files: dict[str, list[int]] = {}  # path -> [max_end_line, chunk_count]
+    for meta in res["metadatas"]:
+        entry = files.setdefault(meta["path"], [0, 0])
+        entry[0] = max(entry[0], meta["end_line"])
+        entry[1] += 1
+    return [(path, lines, chunks) for path, (lines, chunks) in sorted(files.items())]
+
+
+def retrieve(question: str, k: int = DEFAULT_TOP_K, db_dir: str = "chroma_db") -> list[Hit]:
+    """Embed `question` and return the top-`k` most similar stored chunks.
+
+    Raises ValueError with a helpful message if the collection hasn't been
+    built yet (i.e. nothing has been ingested).
+    """
+    collection = _collection(db_dir)
+    count = collection.count()
 
     res = collection.query(
         query_embeddings=embed_texts([question]),

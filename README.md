@@ -38,6 +38,11 @@ A CLI tool that:
    own version in a practice file and run `check <file>` — the tutor re-reads it
    from disk, works out what you were going for, and helps you close the gap at
    your level, comparing against how the real codebase does it (`check`).
+7. **Answers side questions about the whole repo**: "which file should I learn
+   first for my level?", "what is this project, big picture?" — answered from a
+   map of every file in the ingested store, fitted to your level and steered by
+   what you've already covered, ending in a ready-to-run `explore` query
+   (`guide`).
 
 Embeddings run locally (`sentence-transformers`, `all-MiniLM-L6-v2`), so only the
 answering, teaching, and screen-reading calls hit the Anthropic API.
@@ -92,6 +97,9 @@ python -m repo_whisperer look
 
 # 2d. Write your own version of a pattern, then get help with it (Phase 3)
 python -m repo_whisperer check practice.js
+
+# 2e. Ask a side question about the whole repo / your learning path
+python -m repo_whisperer guide "which file should I learn first for my level?"
 ```
 
 The store holds **one repo at a time** — re-running `ingest` rebuilds the
@@ -188,6 +196,25 @@ python -m repo_whisperer check practice.js
 An empty or wrong file gets a friendly note, not a crash. Tweak the file and run
 `check` again as many times as you like.
 
+### `guide` — side questions about the whole repo
+
+Every other tutoring command works one thread at a time; `guide` is for the
+questions that need the **whole repo in view** — your learning path, the big
+picture:
+
+```bash
+python -m repo_whisperer guide "which file should I learn first for my level?"
+python -m repo_whisperer guide      # defaults to: where should I start?
+```
+
+The tutor answers from a **map of every file** in the ingested store (plus
+excerpts retrieved for your question, so behavior claims stay cited), fitted to
+your saved level — a beginner gets pointed at the small, self-contained entry
+point, not the gnarliest core file — and steered by the threads you've already
+covered. It names real files only, flags when it's inferring from a filename
+rather than reading code, and ends with a ready-to-run `explore` query so the
+advice turns directly into a lesson.
+
 Options:
 
 - `ingest`: `--db DIR` (store location), `--window N` / `--overlap M` (chunking),
@@ -201,4 +228,6 @@ Options:
   `--exclude APP` (skip an app when picking the window), `--keep` (keep the
   screenshot file).
 - `check`: `--db DIR`, `-k N` (chunks to retrieve for comparison), `--level
+  beginner|intermediate|advanced`, `--state FILE`.
+- `guide`: `--db DIR`, `-k N` (excerpts to retrieve for grounding), `--level
   beginner|intermediate|advanced`, `--state FILE`.

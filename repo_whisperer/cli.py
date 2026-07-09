@@ -7,6 +7,7 @@ Ties the engine together into the commands the learner uses:
     python -m repo_whisperer explore "<where is X>"    # show code + offer to teach
     python -m repo_whisperer look                      # teach the code you highlight
     python -m repo_whisperer check <practice-file>     # help with code you wrote
+    python -m repo_whisperer guide ["<question>"]      # whole-repo learning-path advice
 
 `ingest` walks → chunks → embeds → stores a repo (rebuilding the collection);
 `ask` retrieves the most relevant chunks and prints a grounded, cited answer
@@ -17,9 +18,11 @@ tutor sight: it takes one announced screenshot of your editor and teaches the
 code you've highlighted, using the rest of the visible file as context. `check`
 (Phase 3) completes teach → verify: after learning a pattern, write your own
 version in a practice file and `check` re-reads it from disk and helps you close
-the gap — grounded in the real repo, never a grade. `ask`, `explore`, `look`,
-and `check` default to the `chroma_db/` store, so a typical session is one
-`ingest` followed by as many of them as you like.
+the gap — grounded in the real repo, never a grade. `guide` answers the side
+questions the thread-scoped commands can't — "which file should I learn first
+for my level?" — from a map of the whole ingested repo. `ask`, `explore`,
+`look`, `check`, and `guide` default to the `chroma_db/` store, so a typical
+session is one `ingest` followed by as many of them as you like.
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ from repo_whisperer.store import (
     DEFAULT_WINDOW,
     ingest_repo,
 )
-from repo_whisperer.tutor import LEVELS, check, explore, look
+from repo_whisperer.tutor import LEVELS, check, explore, guide, look
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
@@ -113,6 +116,17 @@ def _cmd_check(args: argparse.Namespace) -> int:
         state_path=args.state,
     )
     return 0 if assistance is not None else 1
+
+
+def _cmd_guide(args: argparse.Namespace) -> int:
+    guide(
+        args.question,
+        level=args.level,
+        k=args.top_k,
+        db_dir=args.db,
+        state_path=args.state,
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -267,6 +281,41 @@ def main(argv: list[str] | None = None) -> int:
         help=f"learning-state file (default: {DEFAULT_STATE_PATH})",
     )
     p_check.set_defaults(func=_cmd_check)
+
+    p_guide = sub.add_parser(
+        "guide", help="ask a side question about the whole repo or your learning path",
+        description=(
+            "The side-question command: whole-repo, learning-path questions "
+            "that the thread-scoped commands can't answer — 'which file "
+            "should I learn first for my level?', 'what is this project, big "
+            "picture?'. The tutor answers from a map of EVERY file in the "
+            "ingested repo (plus excerpts retrieved for your question), fitted "
+            "to your saved level and steered by the threads you've already "
+            "covered, ending with a ready-to-run `explore` query. With no "
+            "question it answers: where should I start?"
+        ),
+    )
+    p_guide.add_argument(
+        "question", nargs="?", default="",
+        help="your side question, in quotes (default: where should I start?)",
+    )
+    p_guide.add_argument(
+        "--db", default=DEFAULT_DB_DIR, metavar="DIR",
+        help=f"ChromaDB store to survey (default: {DEFAULT_DB_DIR})",
+    )
+    p_guide.add_argument(
+        "-k", "--top-k", type=int, default=DEFAULT_TOP_K, dest="top_k",
+        help=f"excerpts to retrieve for grounding (default: {DEFAULT_TOP_K})",
+    )
+    p_guide.add_argument(
+        "--level", choices=LEVELS, default=None,
+        help="teaching altitude (default: your saved level, else beginner)",
+    )
+    p_guide.add_argument(
+        "--state", default=DEFAULT_STATE_PATH, metavar="FILE",
+        help=f"learning-state file (default: {DEFAULT_STATE_PATH})",
+    )
+    p_guide.set_defaults(func=_cmd_guide)
 
     args = parser.parse_args(argv)
 

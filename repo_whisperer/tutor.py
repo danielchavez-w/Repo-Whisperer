@@ -52,6 +52,7 @@ from repo_whisperer.answer import (
     Hit,
     _client,
     build_context,
+    repo_map,
     retrieve,
 )
 from repo_whisperer.learning import DEFAULT_STATE_PATH
@@ -83,6 +84,19 @@ MAX_NUDGE_TOKENS: int = 400
 # this is almost certainly the wrong file (a bundle, a log). Truncating keeps
 # the prompt sane while still letting an honest attempt through with a note.
 MAX_ATTEMPT_CHARS: int = 20_000
+
+# A guide answer is orientation, not a lesson — a few short paragraphs.
+MAX_GUIDE_TOKENS: int = 1024
+
+# What `guide` answers when the learner doesn't type a question of their own.
+DEFAULT_GUIDE_QUESTION: str = (
+    "Where should I start in this repo, and which file should I learn first "
+    "for my level?"
+)
+
+# Cap on the file map handed to the guide prompt; repos bigger than this get
+# the largest files listed plus a count of the rest, keeping the prompt sane.
+MAX_MAP_FILES: int = 200
 
 # At most this many next-thread suggestions per nudge.
 MAX_NUDGES: int = 3
@@ -350,6 +364,43 @@ CHECK_ASSIST_SYSTEM_PROMPT = (
     "whole-repo lesson.\n"
     "- Be warm and concrete — a few focused paragraphs — and end by pointing at "
     "the most useful next thing to try in their file."
+)
+
+# The side-question voice: whole-repo, learning-path questions ("where should I
+# start?", "which file fits my level?") that no single retrieval thread can
+# answer. The only prompt handed a MAP of every file in the ingested store —
+# the bird's-eye view — alongside the usual level + covered-threads context.
+GUIDE_SYSTEM_PROMPT = (
+    "You are a patient expert coding tutor with a bird's-eye view of ONE "
+    "ingested repository. The learner has a SIDE QUESTION — about the repo as "
+    "a whole or about their own learning path ('where should I start?', "
+    "'which file should I learn first for my level?', 'what is this project, "
+    "big picture?') — rather than about one specific thread of code.\n\n"
+    "You are given: a MAP of every file in the ingested repo (path, line "
+    "count, chunk count), a few code excerpts retrieved for their question "
+    "(each labeled `path:start-end`), the threads you've already taught them, "
+    "and their level.\n\n"
+    "Rules:\n"
+    "- Answer their actual question, concretely: recommend by naming REAL "
+    "files from the map, with their exact paths. Never mention a file that "
+    "isn't in the map.\n"
+    "- The map tells you what exists and how big it is — not what the code "
+    "does. Ground claims about behavior in the excerpts (cite their "
+    "`path:start-end` keys); you may reason from a filename (\"`player.js` "
+    "most likely handles the player\") only if you flag it as a read of the "
+    "name, not the code.\n"
+    "- Fit the advice to WHO is asking: for a beginner, favor the small, "
+    "self-contained, concrete entry point over the biggest or most central "
+    "file; for advanced, go straight at the core. Factor in the threads "
+    "already covered — build on them rather than re-recommending them.\n"
+    "- Give a short WHY per recommendation — what makes it the right next "
+    "step for them — and keep the whole answer to a few short paragraphs. "
+    "One or two recommendations beat a ranked tour of the repo.\n"
+    "- End with the concrete next move: a ready-to-run "
+    "`explore \"<topic>\"` query for your top recommendation. (You may also "
+    "mention `look`, but describe it correctly: it takes NO file argument — "
+    "they open the file in their editor, highlight the code they're curious "
+    "about, and run plain `look`.) Suggestions, never pressure."
 )
 
 FOLLOWUP_SYSTEM_PROMPT = (
@@ -1610,6 +1661,97 @@ def check(
     print("\n" + "-" * 60)
     print(f"Tweak the file and run `check {file}` again whenever you're ready.")
     return assistance
+
+
+def _format_repo_map(files: list[tuple[str, int, int]]) -> str:
+    """Render the repo map for the guide prompt, one file per line.
+
+    Repos beyond `MAX_MAP_FILES` keep their largest files (the likelier
+    landmarks) plus a count of what was elided, so the prompt stays bounded.
+    """
+    elided = ""
+    if len(files) > MAX_MAP_FILES:
+        kept = sorted(files, key=lambda f: f[1], reverse=True)[:MAX_MAP_FILES]
+        elided = f"\n… and {len(files) - MAX_MAP_FILES} more, smaller files."
+        files = sorted(kept)
+    lines = [
+        f"{path} — {line_count} lines ({chunks} chunk{'s' if chunks != 1 else ''})"
+        for path, line_count, chunks in files
+    ]
+    return "\n".join(lines) + elided
+
+
+def answer_side_question(
+    question: str,
+    files: list[tuple[str, int, int]],
+    hits: list[Hit],
+    prior: str = "",
+    level: str = DEFAULT_LEVEL,
+    model: str = TEACH_MODEL,
+) -> str:
+    """Answer a whole-repo / learning-path question, at `level`.
+
+    The guide voice: `files` is the map of everything in the ingested store
+    (the bird's-eye view no single retrieval can give), `hits` are excerpts
+    retrieved for the question so behavior claims stay grounded and citable,
+    and `prior` keeps the advice building on what's already covered. Raises
+    ValueError on an unknown level or a missing API key.
+    """
+    _check_level(level)
+    excerpts = (
+        f"Code excerpts retrieved for their question (cite by `path:start-end`):"
+        f"\n\n{build_context(hits)}"
+        if hits
+        else "(No excerpts retrieved.)"
+    )
+    user_message = (
+        f'The learner\'s side question: "{question}"\n\n'
+        f"The MAP of every file in the ingested repo:\n\n{_format_repo_map(files)}\n\n"
+        f"{excerpts}\n\n"
+        f"Threads you've already taught them:\n{prior or '(none yet)'}\n\n"
+        f"Answer their question with concrete, level-fitted guidance."
+    )
+    system = f"{GUIDE_SYSTEM_PROMPT}\n\n{_level_block(level)}"
+    return _ask_model(system, user_message, MAX_GUIDE_TOKENS, model)
+
+
+def guide(
+    question: str = "",
+    level: str | None = None,
+    k: int = DEFAULT_TOP_K,
+    db_dir: str = "chroma_db",
+    model: str = TEACH_MODEL,
+    state_path: str | None = DEFAULT_STATE_PATH,
+) -> str:
+    """Answer a side question about the whole repo or the learning path.
+
+    The learner's escape hatch from thread-scoped tutoring: `explore`/`look`/
+    `check` all work one thread at a time, but "which file should I learn
+    first for my level?" needs the whole repo in view. `guide` hands the tutor
+    a map of every file in the ingested store plus excerpts retrieved for the
+    question, the saved level, and the covered threads — and answers with
+    concrete, named-file recommendations that end in a ready-to-run `explore`
+    query. An empty `question` asks the default where-should-I-start question.
+    Reads the learning state; writes nothing. Raises ValueError when nothing
+    has been ingested (a whole-repo question needs a repo).
+    """
+    state = learning.load_state(state_path)
+    level = level or state.level or DEFAULT_LEVEL
+    _check_level(level)
+    question = question.strip() or DEFAULT_GUIDE_QUESTION
+
+    files = repo_map(db_dir)
+    hits = retrieve(question, k=k, db_dir=db_dir)
+    plural = "file" if len(files) == 1 else "files"
+    print(f"🧭 Looking across the whole ingested repo ({len(files)} {plural}) …")
+
+    reply = answer_side_question(
+        question, files, hits,
+        prior=state.prior_brief(), level=level, model=model,
+    )
+    print("\n" + "-" * 60)
+    print(reply)
+    return reply
 
 
 def _main(argv: list[str]) -> int:
